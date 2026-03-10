@@ -455,18 +455,105 @@ def build_td_figure(df: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
     return fig
 
+def calc_rsi_numpy(prices: pd.Series, period: int = 14) -> pd.Series:
+    delta = prices.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ma_up = up.ewm(com=period - 1, adjust=True, min_periods=period).mean()
+    ma_down = down.ewm(com=period - 1, adjust=True, min_periods=period).mean()
+    rsi = ma_up / (ma_up + ma_down) * 100
+    return rsi.fillna(50)
+
+
+def get_slope_numpy(values: np.ndarray, window: int) -> float:
+    if len(values) < window:
+        return 0.0
+    sample = values[-window:]
+    x_axis = np.arange(len(sample))
+    slope, _ = np.polyfit(x_axis, sample, 1)
+    return float(slope)
+
+
+def get_smart_extended_data(
+    series_values: np.ndarray,
+    horizon: int = 20,
+    short_win: int = 20,
+    long_win: int = 100,
+    alpha: float = 0.6,
+    decay: float = 0.96,
+) -> np.ndarray:
+    current_len = len(series_values)
+    slope_short = get_slope_numpy(series_values, short_win)
+    slope_long = get_slope_numpy(series_values, min(current_len, long_win))
+    effective_alpha = max(alpha, 0.9) if slope_short < slope_long else alpha
+    hybrid_slope = (slope_short * effective_alpha) + (slope_long * (1 - effective_alpha))
+    decay_factors = decay ** np.arange(1, horizon + 1)
+    future_steps = np.cumsum(hybrid_slope * decay_factors)
+    return np.concatenate([series_values, series_values[-1] + future_steps])
+
+
+def calc_rolling_stl_enhanced(
+    series: pd.Series,
+    trend_window: int = 31,
+    horizon: int = 20,
+    alpha: float = 0.6,
+    decay: float = 0.96,
+    min_history: int = 150,
+) -> tuple[pd.Series, pd.Series]:
+    prices = series.to_numpy(dtype=float)
+    dates = series.index
+    count = len(prices)
+    rolling_trend = np.full(count, np.nan)
+    rolling_resid = np.full(count, np.nan)
+    if trend_window % 2 == 0:
+        trend_window += 1
+
+    log_prices = np.log(prices)
+    for cursor in range(min_history, count):
+        current_log_data = log_prices[: cursor + 1]
+        extended_data = get_smart_extended_data(
+            current_log_data,
+            horizon=horizon,
+            short_win=20,
+            long_win=100,
+            alpha=alpha,
+            decay=decay,
+        )
+        result = STL(extended_data, period=5, trend=trend_window, robust=False).fit()
+        rolling_trend[cursor] = result.trend[cursor]
+        rolling_resid[cursor] = result.resid[cursor]
+
+    return pd.Series(np.exp(rolling_trend), index=dates), pd.Series(rolling_resid, index=dates)
+
+
+def calculate_hybrid_score(
+    resid_series: pd.Series,
+    rsi_series: pd.Series,
+    w_resid: float = 0.6,
+    w_rsi: float = 0.4,
+    smooth_win: int = 3,
+) -> pd.Series:
+    resid_vol = resid_series.rolling(20).std().bfill()
+    z_score = resid_series / resid_vol.replace(0, np.nan)
+    score_resid = ((z_score.clip(-3, 3) + 3) / 6) * 100
+    raw_score = (score_resid * w_resid) + (rsi_series * w_rsi)
+    return raw_score.rolling(smooth_win).mean()
+
+
 def compute_stl_cycle(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
-    log_close = np.log(work["Close"])
-    stl = STL(log_close, period=5, trend=31, robust=True).fit()
-    work["Trend"] = np.exp(stl.trend)
-    work["Residual"] = stl.resid
-    work["RSI"] = calc_rsi(work["Close"])
-
-    resid_vol = work["Residual"].rolling(20).std().replace(0, np.nan).bfill()
-    z_score = (work["Residual"] / resid_vol).clip(-3, 3)
-    resid_score = ((z_score + 3) / 6) * 100
-    work["Cycle_Score"] = ((0.6 * resid_score) + (0.4 * work["RSI"])).rolling(3).mean().clip(0, 100)
+    work["RSI"] = calc_rsi_numpy(work["Close"])
+    trend, resid = calc_rolling_stl_enhanced(
+        work["Close"],
+        trend_window=31,
+        horizon=20,
+        alpha=0.6,
+        decay=0.96,
+        min_history=150,
+    )
+    work["Trend"] = trend
+    work["Residual"] = resid
+    work["Cycle_Score"] = calculate_hybrid_score(work["Residual"], work["RSI"], w_resid=0.6, w_rsi=0.4, smooth_win=3).clip(0, 100)
     return work
 
 
@@ -1112,9 +1199,39 @@ def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure
         row=3,
         col=2,
     )
-    for row, col in [(1, 1), (1, 2), (2, 1), (2, 2)]:
-        fig.add_vline(x=spot, line_dash="dash", line_color="#64748b", opacity=0.7, row=row, col=col)
-    fig.add_vline(x=options_data["max_pain"], line_dash="dot", line_color="#b42318", row=1, col=2)
+    x_values = view["strike"]
+    spot_line = [spot] * len(view)
+    max_pain_line = [options_data["max_pain"]] * len(view)
+    for y_series, row, col in [
+        (view["gex"] / 1e9, 1, 1),
+        (view["pain"], 1, 2),
+        (view["vanna"] / 1e9, 2, 1),
+        (view["charm"] / 1e6, 2, 2),
+    ]:
+        fig.add_trace(
+            go.Scatter(
+                x=spot_line,
+                y=np.linspace(float(np.nanmin(y_series)), float(np.nanmax(y_series)), len(view)),
+                mode="lines",
+                line=dict(color="#64748b", width=1, dash="dash"),
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=col,
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=max_pain_line,
+            y=np.linspace(float(np.nanmin(view["pain"])), float(np.nanmax(view["pain"])), len(view)),
+            mode="lines",
+            line=dict(color="#b42318", width=1, dash="dot"),
+            showlegend=False,
+            hoverinfo="skip",
+        ),
+        row=1,
+        col=2,
+    )
     fig.update_layout(
         height=960,
         margin=dict(l=24, r=24, t=64, b=16),
