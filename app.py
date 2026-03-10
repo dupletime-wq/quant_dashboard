@@ -820,9 +820,42 @@ def build_market_figure(market_data: dict[str, Any]) -> go.Figure:
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["Breadth"], name="Breadth", line=dict(color="#dd6b20", width=1.8)), row=2, col=2)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["Sector"], name="Sector", line=dict(color="#2563eb", width=1.8)), row=2, col=2)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["Credit"], name="Credit", line=dict(color="#0f766e", width=1.8)), row=2, col=2)
-    fig.add_hline(y=0.8, line_dash="dot", line_color="#b42318", row=1, col=2)
-    fig.add_hline(y=0.2, line_dash="dot", line_color="#0f766e", row=1, col=2)
-    fig.add_hline(y=0.5, line_dash="dot", line_color="#64748b", row=2, col=2)
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=[0.8] * len(plot_df),
+            mode="lines",
+            line=dict(color="#b42318", width=1, dash="dot"),
+            name="Greed threshold",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=[0.2] * len(plot_df),
+            mode="lines",
+            line=dict(color="#0f766e", width=1, dash="dot"),
+            name="Fear threshold",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=[0.5] * len(plot_df),
+            mode="lines",
+            line=dict(color="#64748b", width=1, dash="dot"),
+            name="Neutral threshold",
+            showlegend=False,
+        ),
+        row=2,
+        col=2,
+    )
     fig.update_layout(
         height=820,
         margin=dict(l=24, r=24, t=64, b=16),
@@ -1177,3 +1210,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
