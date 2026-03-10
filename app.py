@@ -1444,8 +1444,8 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str | None]:
     with st.sidebar.form("query_form"):
         st.subheader("Dashboard Controls")
         ticker = st.text_input("Ticker", value=st.session_state.get("ticker", default_ticker)).strip().upper()
-        period_options = ["1y", "2y", "3y", "5y"]
-        default_period = st.session_state.get("period", "3y")
+        period_options = ["1y", "2y"]
+        default_period = st.session_state.get("period", "2y")
         period = st.selectbox("History window", options=period_options, index=period_options.index(default_period) if default_period in period_options else 2)
         st.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, BTC-USD")
         submitted = st.form_submit_button("Run Dashboard", use_container_width=True)
