@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import re
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
@@ -891,91 +893,172 @@ def get_risk_free_rate() -> float:
         return 0.04
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_option_expiries(ticker: str) -> list[str]:
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_spx_options_payload() -> dict[str, Any] | None:
     try:
-        return list(yf.Ticker(ticker).options)
+        response = requests.get(
+            "https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if "data" not in payload:
+            return None
+        return payload
     except Exception:
+        return None
+
+
+def parse_spx_option_symbol(symbol: str) -> tuple[str, str, float] | None:
+    match = re.search(r"(\d{6})([CP])(\d{8})$", symbol)
+    if not match:
+        return None
+    raw_date, cp_flag, raw_strike = match.groups()
+    expiry = f"20{raw_date[:2]}-{raw_date[2:4]}-{raw_date[4:6]}"
+    strike = int(raw_strike) / 1000.0
+    return expiry, cp_flag, strike
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_spx_expiries() -> list[str]:
+    payload = fetch_spx_options_payload()
+    if not payload:
         return []
+    options = payload.get("data", {}).get("options", [])
+    expiries = set()
+    for item in options:
+        parsed = parse_spx_option_symbol(item.get("option", ""))
+        if parsed:
+            expiries.add(parsed[0])
+    return sorted(expiries)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_options_chain(ticker: str, expiry: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    chain = yf.Ticker(ticker).option_chain(expiry)
-    return chain.calls.copy(), chain.puts.copy()
-
-
-def compute_options_analytics(ticker: str, spot: float, expiry: str | None = None) -> dict[str, Any] | None:
-    expiries = get_option_expiries(ticker)
-    if not expiries:
-        return None
-    selected_expiry = expiry if expiry in expiries else expiries[0]
+def get_vix_term_structure() -> dict[str, float]:
     try:
-        calls, puts = get_options_chain(ticker, selected_expiry)
+        vix_all = yf.download(["^VIX9D", "^VIX", "^VIX3M"], period="5d", progress=False, auto_adjust=False)["Close"]
+        return {
+            "vix9d": float(vix_all["^VIX9D"].iloc[-1]),
+            "vix30d": float(vix_all["^VIX"].iloc[-1]),
+            "vix3m": float(vix_all["^VIX3M"].iloc[-1]),
+        }
     except Exception:
-        return None
-    if calls.empty and puts.empty:
+        return {"vix9d": 18.0, "vix30d": 19.0, "vix3m": 20.0}
+
+
+def compute_options_analytics(expiry: str | None = None, spot_range_pct: float = 0.15) -> dict[str, Any] | None:
+    payload = fetch_spx_options_payload()
+    if not payload:
         return None
 
-    time_to_expiry = max((pd.Timestamp(selected_expiry) - pd.Timestamp.now().normalize()).days / 365.25, 0.0027)
+    data = payload.get("data", {})
+    spot = float(data.get("current_price") or data.get("close") or 0)
+    option_rows = data.get("options", [])
+    expiries = get_spx_expiries()
+    if not spot or not expiries:
+        return None
+
+    selected_expiry = expiry if expiry in expiries else expiries[0]
+    target_token = pd.Timestamp(selected_expiry).strftime("%y%m%d")
     risk_free = get_risk_free_rate()
-    frames = []
-    for option_type, chain in [("call", calls), ("put", puts)]:
-        if chain.empty:
-            continue
-        chain = chain.copy()
-        chain["openInterest"] = pd.to_numeric(chain["openInterest"], errors="coerce").fillna(0)
-        chain["volume"] = pd.to_numeric(chain["volume"], errors="coerce").fillna(0)
-        chain["impliedVolatility"] = pd.to_numeric(chain["impliedVolatility"], errors="coerce")
-        fallback_iv = chain["impliedVolatility"].replace(0, np.nan).dropna().median()
-        chain["impliedVolatility"] = chain["impliedVolatility"].replace(0, np.nan).fillna(0.35 if np.isnan(fallback_iv) else fallback_iv)
-        chain["option_type"] = option_type
-        frames.append(chain[["strike", "openInterest", "volume", "impliedVolatility", "option_type"]])
+    vix_data = get_vix_term_structure()
+    fallback_sigma = max(vix_data["vix30d"] / 100.0, 0.05)
+    time_to_expiry = max(
+        (pd.Timestamp(selected_expiry) - pd.Timestamp.now().normalize()).total_seconds() / (365.25 * 24 * 3600),
+        0.001,
+    )
 
-    options_df = pd.concat(frames, ignore_index=True)
-    options_df = options_df[(options_df["strike"] >= spot * 0.85) & (options_df["strike"] <= spot * 1.15)].copy()
-    if options_df.empty:
+    strike_map: dict[float, dict[str, float]] = {}
+    total_call_volume = 0.0
+    total_put_volume = 0.0
+
+    for item in option_rows:
+        symbol = item.get("option", "")
+        if target_token not in symbol:
+            continue
+
+        parsed = parse_spx_option_symbol(symbol)
+        if not parsed:
+            continue
+
+        _, cp_flag, strike = parsed
+        open_interest = float(item.get("open_interest") or 0)
+        volume = float(item.get("volume") or 0)
+        implied_vol = item.get("implied_volatility") or item.get("volatility") or fallback_sigma
+        sigma = float(implied_vol) if float(implied_vol) > 0 else fallback_sigma
+
+        if cp_flag == "C":
+            total_call_volume += volume
+        else:
+            total_put_volume += volume
+
+        if open_interest <= 0:
+            continue
+
+        if strike not in strike_map:
+            strike_map[strike] = {"call_oi": 0.0, "put_oi": 0.0, "gex": 0.0, "vanna": 0.0, "charm": 0.0}
+
+        greeks = bs_greeks(spot, strike, time_to_expiry, risk_free, 0.014, sigma, "call" if cp_flag == "C" else "put")
+        multiplier = spot * spot * 0.01 * 100
+        gex = greeks["gamma"] * open_interest * multiplier
+        vanna = greeks["vanna"] * open_interest * spot * 0.01 * 100
+        charm = greeks["charm"] * open_interest * 100
+
+        if cp_flag == "C":
+            strike_map[strike]["call_oi"] += open_interest
+            strike_map[strike]["gex"] += gex
+            strike_map[strike]["vanna"] += vanna
+            strike_map[strike]["charm"] += charm
+        else:
+            strike_map[strike]["put_oi"] += open_interest
+            strike_map[strike]["gex"] -= gex
+            strike_map[strike]["vanna"] -= vanna
+            strike_map[strike]["charm"] -= charm
+
+    if not strike_map:
         return None
 
-    multiplier = spot * spot * 0.01 * 100
-    rows = []
-    for _, row in options_df.iterrows():
-        greeks = bs_greeks(spot, float(row["strike"]), time_to_expiry, risk_free, 0.0, float(row["impliedVolatility"]), str(row["option_type"]))
-        sign = 1 if row["option_type"] == "call" else -1
-        rows.append({
-            "strike": float(row["strike"]),
-            "type": row["option_type"],
-            "openInterest": float(row["openInterest"]),
-            "volume": float(row["volume"]),
-            "gex": sign * greeks["gamma"] * row["openInterest"] * multiplier,
-            "vanna": sign * greeks["vanna"] * row["openInterest"] * spot * 100,
-            "charm": sign * greeks["charm"] * row["openInterest"] * 100,
-        })
+    strike_view = pd.DataFrame.from_dict(strike_map, orient="index").reset_index().rename(columns={"index": "strike"})
+    strike_view = strike_view.sort_values("strike")
+    strike_view = strike_view[
+        (strike_view["strike"] >= spot * (1 - spot_range_pct))
+        & (strike_view["strike"] <= spot * (1 + spot_range_pct))
+    ].copy()
+    if strike_view.empty:
+        return None
 
-    expo_df = pd.DataFrame(rows)
-    expo_df["call_oi"] = np.where(expo_df["type"] == "call", expo_df["openInterest"], 0.0)
-    expo_df["put_oi"] = np.where(expo_df["type"] == "put", expo_df["openInterest"], 0.0)
-    strike_view = expo_df.groupby("strike", as_index=False).agg(gex=("gex", "sum"), vanna=("vanna", "sum"), charm=("charm", "sum"), call_oi=("call_oi", "sum"), put_oi=("put_oi", "sum")).sort_values("strike")
+    strike_view["pain"] = [
+        ((strike - strike_view["strike"]).clip(lower=0) * strike_view["call_oi"]).sum()
+        + ((strike_view["strike"] - strike).clip(lower=0) * strike_view["put_oi"]).sum()
+        for strike in strike_view["strike"]
+    ]
 
-    total_call_volume = float(expo_df.loc[expo_df["type"] == "call", "volume"].sum())
-    total_put_volume = float(expo_df.loc[expo_df["type"] == "put", "volume"].sum())
-    put_call_ratio = total_put_volume / total_call_volume if total_call_volume else np.nan
-    strike_view["pain"] = [((strike - strike_view["strike"]).clip(lower=0) * strike_view["call_oi"]).sum() + ((strike_view["strike"] - strike).clip(lower=0) * strike_view["put_oi"]).sum() for strike in strike_view["strike"]]
+    put_call_ratio = total_put_volume / total_call_volume if total_call_volume > 0 else 1.0
     max_pain = float(strike_view.loc[strike_view["pain"].idxmin(), "strike"])
 
     return {
+        "underlying": "SPX",
+        "spot": spot,
         "expiry": selected_expiry,
         "expiries": expiries,
         "strike_view": strike_view,
         "put_call_ratio": put_call_ratio,
         "max_pain": max_pain,
         "net_gex": float(strike_view["gex"].sum()),
+        "net_vanna": float(strike_view["vanna"].sum()),
+        "net_charm": float(strike_view["charm"].sum()),
+        "vix9d": vix_data["vix9d"],
+        "vix30d": vix_data["vix30d"],
+        "vix3m": vix_data["vix3m"],
+        "lower_bound": float(spot * (1 - spot_range_pct)),
+        "upper_bound": float(spot * (1 + spot_range_pct)),
     }
 
 
 def options_signal_label(options_data: dict[str, Any] | None) -> tuple[str, str]:
     if not options_data:
-        return "No listed options", "neutral"
+        return "SPX data unavailable", "neutral"
     pcr = 1.0 if np.isnan(options_data["put_call_ratio"]) else options_data["put_call_ratio"]
     net_gex = options_data["net_gex"]
     if pcr > 1.3 and net_gex < 0:
@@ -987,26 +1070,62 @@ def options_signal_label(options_data: dict[str, Any] | None) -> tuple[str, str]
 
 def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure:
     view = options_data["strike_view"]
-    fig = make_subplots(rows=2, cols=2, subplot_titles=("Dealer GEX", "Open Interest", "Pain Profile", "Vanna and Charm"), vertical_spacing=0.12, horizontal_spacing=0.08)
-    fig.add_trace(go.Bar(x=view["strike"], y=view["gex"] / 1e6, marker_color="#2563eb", name="GEX (M)"), row=1, col=1)
-    fig.add_trace(go.Bar(x=view["strike"], y=view["call_oi"], marker_color="#0f766e", name="Call OI"), row=1, col=2)
-    fig.add_trace(go.Bar(x=view["strike"], y=-view["put_oi"], marker_color="#b42318", name="Put OI"), row=1, col=2)
-    fig.add_trace(go.Scatter(x=view["strike"], y=view["pain"], fill="tozeroy", line=dict(color="#dd6b20", width=2), name="Pain"), row=2, col=1)
-    fig.add_trace(go.Bar(x=view["strike"], y=view["vanna"] / 1e6, marker_color="#0f766e", name="Vanna (M)"), row=2, col=2)
-    fig.add_trace(go.Scatter(x=view["strike"], y=view["charm"] / 1e4, line=dict(color="#111827", width=2), name="Charm (x10k)"), row=2, col=2)
-    for row in [1, 2]:
-        for col in [1, 2]:
-            fig.add_vline(x=spot, line_dash="dash", line_color="#64748b", opacity=0.7, row=row, col=col)
-    fig.add_vline(x=options_data["max_pain"], line_dash="dot", line_color="#b42318", row=2, col=1)
+    fig = make_subplots(
+        rows=3,
+        cols=2,
+        specs=[[{"type": "xy"}, {"type": "xy"}], [{"type": "xy"}, {"type": "xy"}], [{"type": "xy"}, {"type": "indicator"}]],
+        subplot_titles=("Dealer Net GEX", "Max Pain Profile", "Net Vanna", "Net Charm", "VIX Term Structure", "Put/Call Volume"),
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08,
+    )
+    fig.add_trace(go.Bar(x=view["strike"], y=view["gex"] / 1e9, marker_color="#2563eb", name="GEX (B)"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view["strike"], y=view["pain"], fill="tozeroy", line=dict(color="#b42318", width=2), name="Pain"), row=1, col=2)
+    fig.add_trace(go.Bar(x=view["strike"], y=view["vanna"] / 1e9, marker_color="#0f766e", name="Vanna (B)"), row=2, col=1)
+    fig.add_trace(go.Bar(x=view["strike"], y=view["charm"] / 1e6, marker_color="#dd6b20", name="Charm (M)"), row=2, col=2)
+    fig.add_trace(
+        go.Scatter(
+            x=["9D", "30D", "3M"],
+            y=[options_data["vix9d"], options_data["vix30d"], options_data["vix3m"]],
+            mode="lines+markers",
+            line=dict(width=3, color="#7c3aed"),
+            fill="tozeroy",
+            name="VIX curve",
+        ),
+        row=3,
+        col=1,
+    )
+    fig.add_trace(
+        go.Indicator(
+            mode="gauge+number",
+            value=options_data["put_call_ratio"],
+            gauge={
+                "axis": {"range": [0, 2]},
+                "bar": {"color": "#102a43"},
+                "steps": [
+                    {"range": [0, 0.7], "color": "#dcfce7"},
+                    {"range": [0.7, 1.3], "color": "#f8fafc"},
+                    {"range": [1.3, 2], "color": "#fee2e2"},
+                ],
+            },
+            title={"text": "PCR"},
+        ),
+        row=3,
+        col=2,
+    )
+    for row, col in [(1, 1), (1, 2), (2, 1), (2, 2)]:
+        fig.add_vline(x=spot, line_dash="dash", line_color="#64748b", opacity=0.7, row=row, col=col)
+    fig.add_vline(x=options_data["max_pain"], line_dash="dot", line_color="#b42318", row=1, col=2)
     fig.update_layout(
-        height=820,
+        height=960,
         margin=dict(l=24, r=24, t=64, b=16),
         paper_bgcolor="rgba(255,255,255,0.0)",
         plot_bgcolor="rgba(255,255,255,0.0)",
-        title=f"Options Positioning ({options_data['expiry']})",
-        legend=dict(orientation="h", y=1.08, x=0),
+        title=f"SPX Options Positioning ({options_data['expiry']})",
+        showlegend=False,
     )
     fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
+    for row, col in [(1, 1), (1, 2), (2, 1), (2, 2)]:
+        fig.update_xaxes(range=[options_data["lower_bound"], options_data["upper_bound"]], row=row, col=col)
     return fig
 
 def build_summary(
@@ -1079,7 +1198,7 @@ def render_header(summary: DashboardSummary, market_data: dict[str, Any], option
     with cards[4]:
         render_metric_card("STL Cycle", summary.stl_label, market_status, market_tone)
     with cards[5]:
-        subtitle = f"Max pain {options_data['max_pain']:.2f}" if options_data else "No option chain"
+        subtitle = f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"
         render_metric_card("Options Flow", options_status, subtitle, options_tone)
 
 
@@ -1099,14 +1218,16 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str | None]:
 
     active_ticker = st.session_state.get("ticker", default_ticker)
     active_period = st.session_state.get("period", "3y")
-    expiry = None
-    expiries = st.session_state.get("option_expiries")
-    if expiries:
-        saved_expiry = st.session_state.get("selected_expiry")
-        default_index = expiries.index(saved_expiry) if saved_expiry in expiries else 0
-        expiry = st.sidebar.selectbox("Option expiry", options=expiries, index=default_index)
-        st.session_state["selected_expiry"] = expiry
-    return active_ticker, active_period, expiry
+    selected_expiry = None
+    spx_expiries = get_spx_expiries()
+    if spx_expiries:
+        saved_expiry = st.session_state.get("selected_spx_expiry")
+        default_index = spx_expiries.index(saved_expiry) if saved_expiry in spx_expiries else 0
+        selected_expiry = st.sidebar.selectbox("SPX option expiry", options=spx_expiries, index=default_index)
+        st.session_state["selected_spx_expiry"] = selected_expiry
+    else:
+        st.sidebar.caption("SPX option chain is temporarily unavailable.")
+    return active_ticker, active_period, selected_expiry
 
 
 def main() -> None:
@@ -1125,9 +1246,7 @@ def main() -> None:
         stl_df = compute_stl_cycle(price_df)
         smc_data = compute_smc(price_df)
         market_data = compute_market_fear_greed()
-        options_data = compute_options_analytics(ticker=ticker, spot=float(price_df["Close"].iloc[-1]), expiry=selected_expiry)
-
-    st.session_state["option_expiries"] = options_data["expiries"] if options_data else get_option_expiries(ticker)
+        options_data = compute_options_analytics(expiry=selected_expiry)
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
     render_header(summary, market_data, options_data)
@@ -1192,18 +1311,18 @@ def main() -> None:
 
     with tabs[6]:
         if not options_data:
-            st.info("No option chain is available for this ticker on Yahoo Finance.")
+            st.info("SPX option data could not be loaded from the CBOE delayed quotes feed.")
         else:
             option_cards = st.columns(4)
             with option_cards[0]:
-                render_metric_card("Expiry", options_data["expiry"], "Current selection", "neutral")
+                render_metric_card("Underlying", f"{options_data['underlying']} {options_data['spot']:,.1f}", options_data["expiry"], "neutral")
             with option_cards[1]:
                 render_metric_card("Put/Call Volume", f"{options_data['put_call_ratio']:.2f}", "Above 1 implies defensive demand", "accent")
             with option_cards[2]:
                 render_metric_card("Max Pain", f"{options_data['max_pain']:.2f}", "Strike with minimum aggregate pain", "neutral")
             with option_cards[3]:
-                render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e6:,.1f}M", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
-            st.plotly_chart(build_options_figure(options_data, float(price_df["Close"].iloc[-1])), use_container_width=True)
+                render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e9:,.2f}B", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
+            st.plotly_chart(build_options_figure(options_data, options_data["spot"]), use_container_width=True)
 
     st.caption("Data source: Yahoo Finance. Options analytics depend on listed option availability and delayed data.")
 
