@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import re
 from typing import Any
 
+import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -170,6 +171,15 @@ def download_price_data(ticker: str, period: str = "3y") -> pd.DataFrame:
 
     df.index = pd.to_datetime(df.index)
     return df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def download_stl_data(ticker: str) -> pd.DataFrame:
+    df = fdr.DataReader(ticker, "2020-01-01")
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df.index = pd.to_datetime(df.index)
+    return df.dropna().copy()
 
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -725,6 +735,13 @@ def compute_smc(df: pd.DataFrame) -> dict[str, Any]:
     for idx in low_idx:
         swings.append({"date": view.index[idx], "price": float(view["Low"].iat[idx]), "type": "L"})
     swings.sort(key=lambda item: item["date"])
+    eq_price = float("nan")
+    if swings:
+        recent_swings = [item for item in swings if item["date"] > (view.index[-1] - timedelta(days=200))]
+        if recent_swings:
+            range_high = max(item["price"] for item in recent_swings)
+            range_low = min(item["price"] for item in recent_swings)
+            eq_price = (range_high + range_low) / 2
 
     current_price = float(view["Close"].iloc[-1])
     zones_table = []
@@ -735,6 +752,8 @@ def compute_smc(df: pd.DataFrame) -> dict[str, Any]:
     return {
         "view": view,
         "poc_price": poc_price,
+        "eq_price": eq_price,
+        "future_end": view.index[-1] + timedelta(days=35),
         "levels": sorted(swings, key=lambda item: item["date"], reverse=True)[:4],
         "zones_table": pd.DataFrame(zones_table),
         "active_bull_ob": active_bull_ob,
@@ -782,22 +801,119 @@ def build_smc_figure(smc_data: dict[str, Any]) -> go.Figure:
     fig.add_hline(y=30, line_dash="dot", line_color="#0f766e", row=2, col=1)
 
     x0 = view.index[0]
-    x1 = view.index[-1] + timedelta(days=14)
-    for zones, color in [
-        (smc_data["active_bull_ob"], "rgba(15,118,110,0.18)"),
-        (smc_data["active_bear_ob"], "rgba(180,35,24,0.18)"),
-        (smc_data["active_bull_fvg"], "rgba(37,99,235,0.14)"),
-        (smc_data["active_bear_fvg"], "rgba(245,158,11,0.16)"),
-    ]:
+    x1 = smc_data["future_end"]
+    label_x = view.index[-1] + timedelta(days=7)
+    zone_configs = [
+        (smc_data["active_bull_ob"], "rgba(15,118,110,0.22)", "#0f766e"),
+        (smc_data["active_bear_ob"], "rgba(180,35,24,0.22)", "#b42318"),
+        (smc_data["active_bull_fvg"], "rgba(37,99,235,0.18)", "#2563eb"),
+        (smc_data["active_bear_fvg"], "rgba(245,158,11,0.20)", "#dd6b20"),
+    ]
+    for zones, fill_color, line_color in zone_configs:
         for zone in zones:
-            fig.add_hrect(y0=zone["bottom"], y1=zone["top"], x0=max(zone["date"], x0), x1=x1, fillcolor=color, line_width=0, row=1, col=1)
+            zone_start = max(zone["date"], x0)
+            fig.add_shape(
+                type="rect",
+                x0=zone_start,
+                x1=x1,
+                y0=zone["bottom"],
+                y1=zone["top"],
+                fillcolor=fill_color,
+                line=dict(color=line_color, width=1),
+                row=1,
+                col=1,
+            )
+            fig.add_annotation(
+                x=label_x,
+                y=(zone["top"] + zone["bottom"]) / 2,
+                text=zone["label"],
+                showarrow=False,
+                font=dict(color=line_color, size=10),
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor=line_color,
+                borderwidth=1,
+                xanchor="left",
+                row=1,
+                col=1,
+            )
 
     if not np.isnan(smc_data["poc_price"]):
-        fig.add_hline(y=smc_data["poc_price"], line_dash="dash", line_color="#334155", row=1, col=1, annotation_text="POC", annotation_position="top right")
+        fig.add_trace(
+            go.Scatter(
+                x=[x0, x1],
+                y=[smc_data["poc_price"], smc_data["poc_price"]],
+                mode="lines",
+                line=dict(color="#334155", width=1.5, dash="dash"),
+                name="POC",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_annotation(
+            x=label_x,
+            y=smc_data["poc_price"],
+            text="POC",
+            showarrow=False,
+            font=dict(color="#334155", size=10),
+            bgcolor="rgba(255,255,255,0.92)",
+            bordercolor="#334155",
+            borderwidth=1,
+            xanchor="left",
+            row=1,
+            col=1,
+        )
+
+    if not np.isnan(smc_data["eq_price"]):
+        fig.add_trace(
+            go.Scatter(
+                x=[x0, x1],
+                y=[smc_data["eq_price"], smc_data["eq_price"]],
+                mode="lines",
+                line=dict(color="#f59e0b", width=1.5),
+                name="EQ (50%)",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_annotation(
+            x=view.index[-20] if len(view) > 20 else view.index[-1],
+            y=smc_data["eq_price"],
+            text="EQ (50%)",
+            showarrow=False,
+            font=dict(color="#111827", size=10),
+            bgcolor="rgba(245,158,11,0.85)",
+            row=1,
+            col=1,
+        )
 
     for level in smc_data["levels"]:
         color = "#0f766e" if level["type"] == "L" else "#b42318"
-        fig.add_hline(y=level["price"], line_dash="dot", line_color=color, opacity=0.35, row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=[level["date"], x1],
+                y=[level["price"], level["price"]],
+                mode="lines",
+                line=dict(color=color, width=1.2, dash="dot"),
+                opacity=0.55,
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_annotation(
+            x=label_x,
+            y=level["price"],
+            text="S/R",
+            showarrow=False,
+            font=dict(color=color, size=10),
+            bgcolor="rgba(255,255,255,0.92)",
+            bordercolor=color,
+            borderwidth=1,
+            xanchor="left",
+            row=1,
+            col=1,
+        )
 
     fig.update_layout(
         height=760,
@@ -807,6 +923,7 @@ def build_smc_figure(smc_data: dict[str, Any]) -> go.Figure:
         title="Smart Money Concepts",
         xaxis_rangeslider_visible=False,
     )
+    fig.update_xaxes(range=[x0, x1], row=1, col=1)
     fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
     return fig
 
@@ -1024,11 +1141,13 @@ def get_spx_expiries() -> list[str]:
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_vix_term_structure() -> dict[str, float]:
     try:
-        vix_all = yf.download(["^VIX9D", "^VIX", "^VIX3M"], period="5d", progress=False, auto_adjust=False)["Close"]
+        vix9d = flatten_columns(yf.download("^VIX9D", period="5d", progress=False, auto_adjust=False))
+        vix30d = flatten_columns(yf.download("^VIX", period="5d", progress=False, auto_adjust=False))
+        vix3m = flatten_columns(yf.download("^VIX3M", period="5d", progress=False, auto_adjust=False))
         return {
-            "vix9d": float(vix_all["^VIX9D"].iloc[-1]),
-            "vix30d": float(vix_all["^VIX"].iloc[-1]),
-            "vix3m": float(vix_all["^VIX3M"].iloc[-1]),
+            "vix9d": float(vix9d["Close"].iloc[-1]),
+            "vix30d": float(vix30d["Close"].iloc[-1]),
+            "vix3m": float(vix3m["Close"].iloc[-1]),
         }
     except Exception:
         return {"vix9d": 18.0, "vix30d": 19.0, "vix3m": 20.0}
@@ -1250,13 +1369,15 @@ def build_summary(
     price_df: pd.DataFrame,
     elder_df: pd.DataFrame,
     td_df: pd.DataFrame,
-    stl_df: pd.DataFrame,
+    stl_df: pd.DataFrame | None,
     market_data: dict[str, Any],
     options_data: dict[str, Any] | None,
 ) -> DashboardSummary:
     elder_label, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
     td_label, _ = td_signal_label(td_df)
-    stl_label, _ = stl_signal_label(float(stl_df["Cycle_Score"].iloc[-1]))
+    stl_label = "Unavailable"
+    if stl_df is not None and not stl_df.dropna(subset=["Cycle_Score"]).empty:
+        stl_label, _ = stl_signal_label(float(stl_df.dropna(subset=["Cycle_Score"])["Cycle_Score"].iloc[-1]))
     market_label, _ = market_data["status"]
     options_label, _ = options_signal_label(options_data)
     return DashboardSummary(
@@ -1360,7 +1481,8 @@ def main() -> None:
     with st.spinner("Computing dashboards..."):
         elder_df = compute_elder_impulse(price_df)
         td_df = compute_td_sequential(price_df)
-        stl_df = compute_stl_cycle(price_df)
+        stl_source_df = download_stl_data(ticker)
+        stl_df = compute_stl_cycle(stl_source_df) if not stl_source_df.empty else None
         smc_data = compute_smc(price_df)
         market_data = compute_market_fear_greed()
         options_data = compute_options_analytics(expiry=selected_expiry)
@@ -1378,7 +1500,10 @@ def main() -> None:
         with overview_cols[1]:
             elder_text, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
             td_text, _ = td_signal_label(td_df)
-            stl_text, _ = stl_signal_label(float(stl_df["Cycle_Score"].iloc[-1]))
+            if stl_df is not None and not stl_df.dropna(subset=["Cycle_Score"]).empty:
+                stl_text, _ = stl_signal_label(float(stl_df.dropna(subset=["Cycle_Score"])["Cycle_Score"].iloc[-1]))
+            else:
+                stl_text = "Unavailable"
             smc_text, _ = smc_signal_label(smc_data)
             market_text, _ = market_data["status"]
             options_text, _ = options_signal_label(options_data)
@@ -1402,7 +1527,10 @@ def main() -> None:
         st.plotly_chart(build_td_figure(td_df), use_container_width=True)
 
     with tabs[3]:
-        st.plotly_chart(build_stl_figure(stl_df), use_container_width=True)
+        if stl_df is None or stl_df.dropna(subset=["Trend", "Cycle_Score"]).empty:
+            st.info("Robust STL data could not be loaded with the original FinanceDataReader workflow for this ticker.")
+        else:
+            st.plotly_chart(build_stl_figure(stl_df), use_container_width=True)
 
     with tabs[4]:
         smc_cols = st.columns([1.8, 1])
