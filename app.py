@@ -28,9 +28,11 @@ st.title("🚀 Ultimate Quant Trading Dashboard (5-in-1)")
 def fetch_stock_data(ticker, days=600):
     end_date = datetime.now() + timedelta(days=1)
     df = yf.download(ticker, start=end_date-timedelta(days=days), end=end_date, progress=False, auto_adjust=False)
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    if isinstance(df.columns, pd.MultiIndex): 
+        df.columns = df.columns.get_level_values(0)
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
+        if col in df.columns: 
+            df[col] = pd.to_numeric(df[col], errors='coerce')
     return df.dropna()
 
 @st.cache_data(ttl=3600)
@@ -44,7 +46,8 @@ def fetch_macro_data():
 # 🧮 1. GEX 옵션 분석 엔진
 # ==========================================
 def bs_greeks(S, K, T, r, q, sigma, cp_type):
-    if T <= 0.0001 or sigma <= 0.001: return {'delta': 0, 'gamma': 0, 'vanna': 0, 'charm': 0}
+    if T <= 0.0001 or sigma <= 0.001: 
+        return {'delta': 0, 'gamma': 0, 'vanna': 0, 'charm': 0}
     d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     delta = np.exp(-q * T) * norm.cdf(d1) if cp_type == 'C' else np.exp(-q * T) * (norm.cdf(d1) - 1)
@@ -57,8 +60,10 @@ def bs_greeks(S, K, T, r, q, sigma, cp_type):
 def render_options_dashboard(target_date):
     live_r = 0.04; live_sigma_fallback = 0.18; div_yield = 0.014
     url = "https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json"
-    try: data = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
-    except: return st.error("CBOE 데이터 통신 실패.")
+    try: 
+        data = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
+    except: 
+        return st.error("CBOE 데이터 통신 실패.")
     
     spot = data['data']['current_price'] or data['data']['close']
     T = max((pd.Timestamp(target_date) - pd.Timestamp.now().normalize()).total_seconds() / (365.25 * 24 * 3600), 0.001)
@@ -74,9 +79,11 @@ def render_options_dashboard(target_date):
         
         if cp == 'C': total_c_vol += vol
         else: total_p_vol += vol
-        if oi == 0: continue
         
-        if strike not in strikes_data: strikes_data[strike] = {'C_OI': 0, 'P_OI': 0, 'GEX': 0, 'Vanna': 0, 'Charm': 0}
+        if oi == 0: continue
+        if strike not in strikes_data: 
+            strikes_data[strike] = {'C_OI': 0, 'P_OI': 0, 'GEX': 0, 'Vanna': 0, 'Charm': 0}
+            
         greeks = bs_greeks(spot, strike, T, live_r, div_yield, sigma, cp)
         gex = greeks['gamma'] * oi * spot * spot * 0.01 * 100
         vanna = greeks['vanna'] * oi * spot * 0.01 * 100
@@ -131,8 +138,10 @@ def render_options_dashboard(target_date):
 # 🧮 2. SMC 엔진
 # ==========================================
 class LabelManager:
-    def __init__(self): self.labels = []
-    def add(self, y, text, color): self.labels.append({'real_y': y, 'text': text, 'color': color})
+    def __init__(self): 
+        self.labels = []
+    def add(self, y, text, color): 
+        self.labels.append({'real_y': y, 'text': text, 'color': color})
     def optimize_and_draw(self, ax, x_pos, y_range_max, y_range_min):
         if not self.labels: return
         total_range = y_range_max - y_range_min
@@ -141,8 +150,10 @@ class LabelManager:
         placed = []
         for l in self.labels:
             curr_y = l['real_y']
-            if placed and (placed[-1]['visual_y'] - curr_y < min_dist): curr_y = placed[-1]['visual_y'] - min_dist
-            l['visual_y'] = curr_y; placed.append(l)
+            if placed and (placed[-1]['visual_y'] - curr_y < min_dist): 
+                curr_y = placed[-1]['visual_y'] - min_dist
+            l['visual_y'] = curr_y
+            placed.append(l)
         for i in placed:
             if abs(i['real_y'] - i['visual_y']) > (total_range * 0.01):
                 ax.plot([x_pos, x_pos], [i['real_y'], i['visual_y']], color=i['color'], linestyle=':', alpha=0.7)
@@ -155,11 +166,15 @@ def calculate_poc(data):
     return (bin_edges[:-1] + bin_edges[1:]) / 2, vol_profile
 
 def get_smart_obs(data):
-    bull, bear = []; body = abs(data['Close'] - data['Open']); rng = data['High'] - data['Low']
+    # 💡 [버그 수정됨] 빈 리스트 선언을 정상적으로 분리
+    bull, bear = [], [] 
+    body = abs(data['Close'] - data['Open'])
+    rng = data['High'] - data['Low']
     for i in range(20, len(data)):
         if pd.isna(data['atr'].iloc[i]): continue
         if (rng.iloc[i] > data['atr'].iloc[i] * 1.2) or (body.iloc[i] > body.rolling(10).mean().iloc[i] * 1.5):
-            prev_o, prev_c, prev_h, prev_l = data['Open'].iloc[i-1], data['Close'].iloc[i-1], data['High'].iloc[i-1], data['Low'].iloc[i-1]
+            prev_o, prev_c = data['Open'].iloc[i-1], data['Close'].iloc[i-1]
+            prev_h, prev_l = data['High'].iloc[i-1], data['Low'].iloc[i-1]
             if data['Close'].iloc[i] < data['Open'].iloc[i] and prev_c >= prev_o:
                 bear.append({'date': data.index[i-1], 'top': prev_h, 'bottom': prev_l, 'type': 'bear', 'strength': rng.iloc[i]})
             elif data['Close'].iloc[i] > data['Open'].iloc[i] and prev_c <= prev_o:
@@ -167,21 +182,31 @@ def get_smart_obs(data):
     return bull, bear
 
 def get_smart_fvgs(data):
-    bull, bear = []; h, l = data['High'], data['Low']
+    # 💡 [버그 수정됨] 빈 리스트 선언을 정상적으로 분리
+    bull, bear = [], []
+    h, l = data['High'], data['Low']
     for i in range(20, len(data)):
         if pd.isna(data['atr'].iloc[i]): continue
-        gap_up, gap_down = l.iloc[i] - h.iloc[i-2], l.iloc[i-2] - h.iloc[i]
-        if l.iloc[i] > h.iloc[i-2] and gap_up > data['atr'].iloc[i] * 0.3: bull.append({'date': data.index[i-1], 'top': l.iloc[i], 'bottom': h.iloc[i-2], 'type': 'bull'})
-        if h.iloc[i] < l.iloc[i-2] and gap_down > data['atr'].iloc[i] * 0.3: bear.append({'date': data.index[i-1], 'top': l.iloc[i-2], 'bottom': h.iloc[i], 'type': 'bear'})
+        gap_up = l.iloc[i] - h.iloc[i-2]
+        gap_down = l.iloc[i-2] - h.iloc[i]
+        if l.iloc[i] > h.iloc[i-2] and gap_up > data['atr'].iloc[i] * 0.3: 
+            bull.append({'date': data.index[i-1], 'top': l.iloc[i], 'bottom': h.iloc[i-2], 'type': 'bull'})
+        if h.iloc[i] < l.iloc[i-2] and gap_down > data['atr'].iloc[i] * 0.3: 
+            bear.append({'date': data.index[i-1], 'top': l.iloc[i-2], 'bottom': h.iloc[i], 'type': 'bear'})
     return bull, bear
 
 def render_smc_dashboard(ticker):
     df_full = fetch_stock_data(ticker, days=600)
+    if df_full.empty:
+        return st.error("해당 종목의 데이터를 불러올 수 없습니다.")
+
     df_full['tr'] = np.maximum((df_full['High']-df_full['Low']), np.maximum(abs(df_full['High']-df_full['Close'].shift(1)), abs(df_full['Low']-df_full['Close'].shift(1))))
-    df_full['atr'] = df_full['tr'].rolling(14).mean(); df_full['vol_ma'] = df_full['Volume'].rolling(20).mean()
+    df_full['atr'] = df_full['tr'].rolling(14).mean()
+    df_full['vol_ma'] = df_full['Volume'].rolling(20).mean()
     df = df_full.iloc[-200:].copy() 
 
-    bull_ob, bear_ob = get_smart_obs(df); bull_fvg, bear_fvg = get_smart_fvgs(df)
+    bull_ob, bear_ob = get_smart_obs(df)
+    bull_fvg, bear_fvg = get_smart_fvgs(df)
     bin_centers, vol_profile = calculate_poc(df)
     poc_price = bin_centers[vol_profile.argmax()] if len(bin_centers) > 0 else 0
 
@@ -193,8 +218,10 @@ def render_smc_dashboard(ticker):
     ax_vol.set_xlim(0, vol_profile.max() * 3); ax_vol.axis('off')
 
     up, down = df[df.Close >= df.Open], df[df.Close < df.Open]
-    ax1.vlines(up.index, up.Low, up.High, color='#089981', linewidth=1); ax1.vlines(down.index, down.Low, down.High, color='#F23645', linewidth=1)
-    ax1.bar(up.index, up.Close-up.Open, bottom=up.Open, width=0.6, color='#089981'); ax1.bar(down.index, down.Close-down.Open, bottom=down.Open, width=0.6, color='#F23645')
+    ax1.vlines(up.index, up.Low, up.High, color='#089981', linewidth=1)
+    ax1.vlines(down.index, down.Low, down.High, color='#F23645', linewidth=1)
+    ax1.bar(up.index, up.Close-up.Open, bottom=up.Open, width=0.6, color='#089981')
+    ax1.bar(down.index, down.Close-down.Open, bottom=down.Open, width=0.6, color='#F23645')
 
     high_idx = argrelextrema(df['High'].values, np.greater, order=5)[0]
     low_idx = argrelextrema(df['Low'].values, np.less, order=5)[0]
@@ -208,14 +235,17 @@ def render_smc_dashboard(ticker):
 
     track_x = mdates.date2num(df.index[-1] + timedelta(days=5))
     label_mgr = LabelManager()
+    
     def add_zone(zones, color, name):
         for z in zones[-4:]: 
             start_num = mdates.date2num(z['date'])
             ax1.add_patch(patches.Rectangle((start_num, z['bottom']), track_x-start_num, z['top']-z['bottom'], facecolor=color, alpha=0.25, edgecolor='none'))
             label_mgr.add((z['top']+z['bottom'])/2, name, color)
 
-    add_zone(bull_ob, "#00E676", "Bull OB"); add_zone(bear_ob, "#FF1744", "Bear OB")
-    add_zone(bull_fvg, "#2979FF", "Bull FVG"); add_zone(bear_fvg, "#FFC107", "Bear FVG")
+    add_zone(bull_ob, "#00E676", "Bull OB")
+    add_zone(bear_ob, "#FF1744", "Bear OB")
+    add_zone(bull_fvg, "#2979FF", "Bull FVG")
+    add_zone(bear_fvg, "#FFC107", "Bear FVG")
 
     swept = []
     for i in range(len(df)):
@@ -240,6 +270,8 @@ def render_smc_dashboard(ticker):
 # ==========================================
 def render_td_dashboard(ticker):
     df = fetch_stock_data(ticker, days=300)
+    if df.empty: return st.error("데이터가 없습니다.")
+    
     df['Buy_Setup'] = 0; df['Sell_Setup'] = 0; df['Buy_Countdown'] = 0; df['Sell_Countdown'] = 0
     active_b_ct, b_idx = False, 0
     active_s_ct, s_idx = False, 0
@@ -287,9 +319,12 @@ def render_td_dashboard(ticker):
 # ==========================================
 def render_macro_dashboard():
     df = fetch_macro_data()
+    if df.empty: return st.error("매크로 데이터 로딩 실패")
+    
     def get_prob(series, inv=False):
         z = (series - series.rolling(252).mean()) / (series.rolling(252).std() + 1e-9)
         return 1 - z.apply(norm.cdf) if inv else z.apply(norm.cdf)
+        
     df['Smart_Score'] = (get_prob(df['SPY'].rolling(20).mean())*0.2 + get_prob((df['RSP']/df['SPY']))*0.4 + get_prob(df['^VIX'], inv=True)*0.4)
     df = df.dropna().tail(250)
     
@@ -304,7 +339,7 @@ def render_macro_dashboard():
     st.pyplot(fig)
 
 # ==========================================
-# 🧮 5. Elder Impulse (대망의 완벽 복구)
+# 🧮 5. Elder Impulse (완벽 복구)
 # ==========================================
 def render_elder_dashboard(ticker):
     df = fetch_stock_data(ticker, days=400)
