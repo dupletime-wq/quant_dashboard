@@ -18,12 +18,13 @@ from scipy.stats import norm
 from statsmodels.tsa.seasonal import STL
 
 
-st.set_page_config(
-    page_title="Quant Fusion Dashboard",
-    page_icon="Q",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+PLOT_FONT = {
+    "family": '"Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif',
+    "size": 14,
+    "color": "#102a43",
+}
+GRID_COLOR = "rgba(71, 85, 105, 0.18)"
+KOREAN_SUFFIX_PATTERN = re.compile(r"^(?P<code>\d{6})\.(KS|KQ)$", re.IGNORECASE)
 
 
 @dataclass
@@ -40,92 +41,159 @@ class DashboardSummary:
     options_label: str
 
 
+def configure_page() -> None:
+    st.set_page_config(
+        page_title="Quant Fusion Dashboard",
+        page_icon="Q",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+
 def apply_custom_style() -> None:
     st.markdown(
         """
         <style>
+        :root {
+            --page-ink: #102a43;
+            --muted-ink: #52606d;
+            --panel-border: rgba(148, 163, 184, 0.22);
+            --bull: #0f766e;
+            --bear: #b42318;
+            --accent: #dd6b20;
+            --neutral: #64748b;
+        }
         .stApp {
+            color: var(--page-ink);
             background:
-                radial-gradient(circle at top left, rgba(255, 239, 213, 0.95), transparent 30%),
+                radial-gradient(circle at top left, rgba(255, 239, 213, 0.96), transparent 30%),
                 radial-gradient(circle at top right, rgba(186, 230, 253, 0.55), transparent 24%),
-                linear-gradient(180deg, #fffdf8 0%, #f6efe2 45%, #fffaf2 100%);
+                linear-gradient(180deg, #fffdf8 0%, #f6efe2 46%, #fffaf2 100%);
         }
         .block-container {
-            max-width: 1480px;
-            padding-top: 1.4rem;
-            padding-bottom: 2.2rem;
+            max-width: 1520px;
+            padding-top: 1.2rem;
+            padding-bottom: 2.4rem;
         }
         .hero {
-            background: linear-gradient(125deg, #0f172a 0%, #134e4a 45%, #f59e0b 100%);
-            border-radius: 28px;
+            background:
+                radial-gradient(circle at top right, rgba(255, 255, 255, 0.18), transparent 20%),
+                linear-gradient(130deg, #0f172a 0%, #134e4a 42%, #f59e0b 100%);
+            border-radius: 30px;
             padding: 2rem 2.2rem;
             color: #fffdf8;
-            margin-bottom: 1.1rem;
-            box-shadow: 0 26px 70px rgba(15, 23, 42, 0.18);
+            margin-bottom: 1rem;
+            box-shadow: 0 28px 78px rgba(15, 23, 42, 0.18);
         }
         .hero h1 {
             margin: 0;
-            font-size: 2.2rem;
+            font-size: 2.3rem;
             letter-spacing: -0.03em;
         }
         .hero p {
-            margin: 0.55rem 0 0;
-            color: rgba(255, 250, 242, 0.9);
-            max-width: 58rem;
-            line-height: 1.55;
+            margin: 0.65rem 0 0;
+            color: rgba(255, 250, 242, 0.94);
+            max-width: 64rem;
+            line-height: 1.6;
+            font-size: 1rem;
         }
         .metric-card {
-            background: rgba(255, 255, 255, 0.86);
-            border: 1px solid rgba(148, 163, 184, 0.16);
+            background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.82));
+            border: 1px solid var(--panel-border);
             border-radius: 22px;
             padding: 1rem 1.05rem;
-            min-height: 7.8rem;
+            min-height: 8rem;
             box-shadow: 0 16px 36px rgba(15, 23, 42, 0.06);
             backdrop-filter: blur(12px);
         }
         .metric-card.bull {
-            border-top: 4px solid #0f766e;
+            border-top: 4px solid var(--bull);
         }
         .metric-card.bear {
-            border-top: 4px solid #b42318;
+            border-top: 4px solid var(--bear);
         }
         .metric-card.neutral {
-            border-top: 4px solid #64748b;
+            border-top: 4px solid var(--neutral);
         }
         .metric-card.accent {
-            border-top: 4px solid #dd6b20;
+            border-top: 4px solid var(--accent);
         }
         .metric-label {
-            color: #52606d;
-            font-size: 0.86rem;
-            font-weight: 700;
+            color: var(--muted-ink);
+            font-size: 0.82rem;
+            font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 0.08em;
         }
         .metric-value {
-            color: #102a43;
+            color: var(--page-ink);
             font-size: 1.72rem;
             font-weight: 800;
-            line-height: 1.1;
+            line-height: 1.12;
             margin-top: 0.5rem;
         }
         .metric-subtitle {
-            color: #52606d;
-            font-size: 0.92rem;
-            margin-top: 0.4rem;
-            line-height: 1.45;
+            color: var(--muted-ink);
+            font-size: 0.93rem;
+            margin-top: 0.42rem;
+            line-height: 1.48;
         }
         .section-note {
-            color: #52606d;
-            font-size: 0.96rem;
-            margin-top: -0.2rem;
-            margin-bottom: 0.7rem;
-        }
-        div[data-testid="stTabs"] button {
-            font-weight: 700;
+            color: var(--muted-ink);
+            font-size: 0.98rem;
+            line-height: 1.55;
+            margin-top: 0.15rem;
+            margin-bottom: 0.8rem;
         }
         div[data-testid="stSidebar"] {
-            background: rgba(255, 250, 240, 0.9);
+            background:
+                radial-gradient(circle at top, rgba(255,255,255,0.55), transparent 24%),
+                linear-gradient(180deg, rgba(255,250,240,0.94), rgba(255,245,233,0.92));
+            border-right: 1px solid rgba(148, 163, 184, 0.18);
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 0.45rem;
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab"] {
+            background: rgba(255, 255, 255, 0.66);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 999px;
+            padding: 0.55rem 1rem;
+            color: var(--page-ink);
+            font-weight: 700;
+        }
+        div[data-testid="stTabs"] [aria-selected="true"] {
+            background: linear-gradient(120deg, #102a43 0%, #0f766e 100%);
+            color: #fffdf8;
+            box-shadow: 0 12px 24px rgba(15, 23, 42, 0.14);
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 20px;
+            box-shadow: 0 16px 34px rgba(15, 23, 42, 0.05);
+        }
+        div[data-testid="stPlotlyChart"] {
+            background: rgba(255,255,255,0.54);
+            border-radius: 24px;
+            padding: 0.25rem;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+        }
+        .signal-panel {
+            background: rgba(255, 255, 255, 0.84);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 24px;
+            padding: 1rem 1rem 0.6rem;
+            box-shadow: 0 18px 34px rgba(15, 23, 42, 0.06);
+        }
+        .data-pill {
+            display: inline-block;
+            margin: 0.15rem 0.4rem 0.15rem 0;
+            padding: 0.34rem 0.7rem;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.06);
+            color: var(--page-ink);
+            font-size: 0.9rem;
+            border: 1px solid rgba(148, 163, 184, 0.16);
         }
         </style>
         """,
@@ -152,34 +220,114 @@ def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def download_price_data(ticker: str, period: str = "3y") -> pd.DataFrame:
-    df = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        progress=False,
-        auto_adjust=False,
-    )
-    df = flatten_columns(df)
-    if df.empty:
-        return df
-
-    for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df.index = pd.to_datetime(df.index)
-    return df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+def normalize_datetime_index(index: Any) -> pd.DatetimeIndex:
+    dt_index = pd.to_datetime(index)
+    if isinstance(dt_index, pd.DatetimeIndex) and dt_index.tz is not None:
+        dt_index = dt_index.tz_localize(None)
+    return dt_index
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def download_stl_data(ticker: str) -> pd.DataFrame:
-    df = fdr.DataReader(ticker, "2020-01-01")
+def normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    df.index = pd.to_datetime(df.index)
-    return df.dropna().copy()
+
+    frame = flatten_columns(df.copy())
+    for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+        if col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+
+    frame.index = normalize_datetime_index(frame.index)
+    required = [col for col in ["Open", "High", "Low", "Close"] if col in frame.columns]
+    if required:
+        frame = frame.dropna(subset=required)
+    else:
+        frame = frame.dropna()
+    return frame.sort_index().copy()
+
+
+def dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def get_yfinance_candidates(ticker: str) -> list[str]:
+    normalized = ticker.strip().upper()
+    match = KOREAN_SUFFIX_PATTERN.match(normalized)
+    if match:
+        code = match.group("code")
+        return dedupe_preserve_order([normalized, f"{code}.KS", f"{code}.KQ", code])
+    if re.fullmatch(r"\d{6}", normalized):
+        return [f"{normalized}.KS", f"{normalized}.KQ", normalized]
+    return [normalized]
+
+
+def get_fdr_candidates(ticker: str) -> list[str]:
+    normalized = ticker.strip().upper()
+    match = KOREAN_SUFFIX_PATTERN.match(normalized)
+    if match:
+        return [match.group("code"), normalized]
+    if re.fullmatch(r"\d{6}", normalized):
+        return [normalized]
+    return [normalized]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def download_price_data(ticker: str, period: str = "3y") -> tuple[pd.DataFrame, str, str]:
+    for candidate in get_yfinance_candidates(ticker):
+        try:
+            df = yf.download(
+                candidate,
+                period=period,
+                interval="1d",
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+        except Exception:
+            continue
+
+        frame = normalize_ohlcv_frame(df)
+        if not frame.empty:
+            return frame, "Yahoo Finance", candidate
+
+    return pd.DataFrame(), "Yahoo Finance", ticker.strip().upper()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def download_stl_data(ticker: str) -> tuple[pd.DataFrame, str, str]:
+    for candidate in get_fdr_candidates(ticker):
+        try:
+            df = fdr.DataReader(candidate, "2020-01-01")
+        except Exception:
+            continue
+
+        frame = normalize_ohlcv_frame(df)
+        if not frame.empty and "Close" in frame.columns:
+            return frame, "FinanceDataReader", candidate
+
+    for candidate in get_yfinance_candidates(ticker):
+        try:
+            df = yf.download(
+                candidate,
+                period="6y",
+                interval="1d",
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+        except Exception:
+            continue
+
+        frame = normalize_ohlcv_frame(df)
+        if not frame.empty and "Close" in frame.columns:
+            return frame, "Yahoo Finance fallback", candidate
+
+    return pd.DataFrame(), "Unavailable", ticker.strip().upper()
 
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -214,6 +362,46 @@ def classify_market_score(score: float) -> tuple[str, str]:
     return "Neutral", "neutral"
 
 
+def apply_figure_style(
+    fig: go.Figure,
+    *,
+    title: str,
+    height: int,
+    showlegend: bool = True,
+    legend_y: float = 1.06,
+    xaxis_rangeslider_visible: bool = False,
+) -> go.Figure:
+    fig.update_layout(
+        title=title,
+        height=height,
+        margin=dict(l=22, r=22, t=58, b=18),
+        paper_bgcolor="rgba(255,255,255,0.0)",
+        plot_bgcolor="rgba(255,255,255,0.0)",
+        font=PLOT_FONT,
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="rgba(255,255,255,0.96)", font_size=13, font_family=PLOT_FONT["family"]),
+        showlegend=showlegend,
+        legend=dict(
+            orientation="h",
+            y=legend_y,
+            x=0,
+            bgcolor="rgba(255,255,255,0.72)",
+            bordercolor="rgba(148, 163, 184, 0.18)",
+            borderwidth=1,
+        ),
+        xaxis_rangeslider_visible=xaxis_rangeslider_visible,
+    )
+    fig.update_xaxes(
+        showgrid=False,
+        showspikes=True,
+        spikemode="across",
+        spikecolor="rgba(15, 23, 42, 0.18)",
+        spikesnap="cursor",
+    )
+    fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False)
+    return fig
+
+
 def compute_overview_figure(df: pd.DataFrame) -> go.Figure:
     view = df.tail(220).copy()
     view["MA21"] = view["Close"].rolling(21).mean()
@@ -246,24 +434,9 @@ def compute_overview_figure(df: pd.DataFrame) -> go.Figure:
     )
     fig.add_trace(go.Scatter(x=view.index, y=view["MA21"], name="MA 21", line=dict(color="#dd6b20", width=1.8)), row=1, col=1)
     fig.add_trace(go.Scatter(x=view.index, y=view["MA50"], name="MA 50", line=dict(color="#2563eb", width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["MA200"], name="MA 200", line=dict(color="#1f2937", width=1.4, dash="dot")), row=1, col=1)
-    fig.add_trace(
-        go.Bar(x=view.index, y=view["Volume"], marker_color=view["Volume_Color"], name="Volume", opacity=0.55),
-        row=2,
-        col=1,
-    )
-    fig.update_layout(
-        height=680,
-        margin=dict(l=24, r=24, t=48, b=16),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
-        legend=dict(orientation="h", y=1.05, x=0),
-        xaxis_rangeslider_visible=False,
-        title="Price Structure Snapshot",
-    )
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.25)")
-    fig.update_xaxes(showgrid=False)
-    return fig
+    fig.add_trace(go.Scatter(x=view.index, y=view["MA200"], name="MA 200", line=dict(color="#1f2937", width=1.5, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["Volume"], marker_color=view["Volume_Color"], name="Volume", opacity=0.58), row=2, col=1)
+    return apply_figure_style(fig, title="Price Structure Snapshot", height=690)
 
 
 def compute_elder_impulse(df: pd.DataFrame) -> pd.DataFrame:
@@ -297,9 +470,9 @@ def compute_elder_impulse(df: pd.DataFrame) -> pd.DataFrame:
 
 def elder_signal_label(state: int, long_term_up: bool) -> tuple[str, str]:
     if state == 1 and long_term_up:
-        return "Bullish Impulse", "bull"
+        return "Bullish impulse", "bull"
     if state == -1 and not long_term_up:
-        return "Bearish Impulse", "bear"
+        return "Bearish impulse", "bear"
     if state == 1:
         return "Bullish, below trend filter", "accent"
     if state == -1:
@@ -326,28 +499,11 @@ def build_elder_figure(df: pd.DataFrame) -> go.Figure:
     )
     fig.add_trace(go.Scatter(x=view.index, y=view["EMA13"], name="EMA 13", line=dict(color="#64748b", width=1.4)), row=1, col=1)
     fig.add_trace(go.Scatter(x=view.index, y=view["EMA65"], name="EMA 65", line=dict(color="#dd6b20", width=1.8, dash="dash")), row=1, col=1)
-    fig.add_trace(
-        go.Scatter(x=view.index, y=view["Buy_Signal"], mode="markers", marker=dict(symbol="triangle-up", size=11, color="#0f766e"), name="Buy trigger"),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=view.index, y=view["Sell_Signal"], mode="markers", marker=dict(symbol="triangle-down", size=11, color="#b42318"), name="Sell trigger"),
-        row=1,
-        col=1,
-    )
+    fig.add_trace(go.Scatter(x=view.index, y=view["Buy_Signal"], mode="markers", marker=dict(symbol="triangle-up", size=11, color="#0f766e"), name="Buy trigger"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Sell_Signal"], mode="markers", marker=dict(symbol="triangle-down", size=11, color="#b42318"), name="Sell trigger"), row=1, col=1)
     fig.add_trace(go.Bar(x=view.index, y=view["MACD_Hist"], marker_color=view["Impulse_Color"].tolist(), name="MACD histogram"), row=2, col=1)
     fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=2, col=1)
-    fig.update_layout(
-        height=720,
-        margin=dict(l=24, r=24, t=48, b=16),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
-        title="Elder Impulse and Trend Filter",
-        xaxis_rangeslider_visible=False,
-    )
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
-    return fig
+    return apply_figure_style(fig, title="Elder Impulse and Trend Filter", height=730)
 
 
 def compute_td_sequential(df: pd.DataFrame) -> pd.DataFrame:
@@ -357,6 +513,11 @@ def compute_td_sequential(df: pd.DataFrame) -> pd.DataFrame:
     work["Buy_Countdown"] = 0
     work["Sell_Countdown"] = 0
 
+    buy_setup_loc = work.columns.get_loc("Buy_Setup")
+    sell_setup_loc = work.columns.get_loc("Sell_Setup")
+    buy_countdown_loc = work.columns.get_loc("Buy_Countdown")
+    sell_countdown_loc = work.columns.get_loc("Sell_Countdown")
+
     active_buy_countdown = False
     active_sell_countdown = False
     buy_count = 0
@@ -364,8 +525,8 @@ def compute_td_sequential(df: pd.DataFrame) -> pd.DataFrame:
     close_values = work["Close"].to_numpy(dtype=float)
 
     for idx in range(4, len(work)):
-        work.iat[idx, work.columns.get_loc("Buy_Setup")] = int(work.iat[idx - 1, work.columns.get_loc("Buy_Setup")]) + 1 if close_values[idx] < close_values[idx - 4] else 0
-        work.iat[idx, work.columns.get_loc("Sell_Setup")] = int(work.iat[idx - 1, work.columns.get_loc("Sell_Setup")]) + 1 if close_values[idx] > close_values[idx - 4] else 0
+        work.iat[idx, buy_setup_loc] = int(work.iat[idx - 1, buy_setup_loc]) + 1 if close_values[idx] < close_values[idx - 4] else 0
+        work.iat[idx, sell_setup_loc] = int(work.iat[idx - 1, sell_setup_loc]) + 1 if close_values[idx] > close_values[idx - 4] else 0
 
         if work["Buy_Setup"].iat[idx] == 9:
             active_buy_countdown = True
@@ -376,13 +537,13 @@ def compute_td_sequential(df: pd.DataFrame) -> pd.DataFrame:
 
         if active_buy_countdown and close_values[idx] <= close_values[idx - 2]:
             buy_count += 1
-            work.iat[idx, work.columns.get_loc("Buy_Countdown")] = buy_count
+            work.iat[idx, buy_countdown_loc] = buy_count
             if buy_count == 13:
                 active_buy_countdown = False
 
         if active_sell_countdown and close_values[idx] >= close_values[idx - 2]:
             sell_count += 1
-            work.iat[idx, work.columns.get_loc("Sell_Countdown")] = sell_count
+            work.iat[idx, sell_countdown_loc] = sell_count
             if sell_count == 13:
                 active_sell_countdown = False
 
@@ -403,13 +564,13 @@ def td_signal_label(df: pd.DataFrame) -> tuple[str, str]:
     buy_setup = int(df["Buy_Setup"].iloc[-1])
     sell_setup = int(df["Sell_Setup"].iloc[-1])
     if buy_cd == 13:
-        return "Buy Countdown 13", "bull"
+        return "Buy countdown 13", "bull"
     if sell_cd == 13:
-        return "Sell Countdown 13", "bear"
+        return "Sell countdown 13", "bear"
     if buy_setup >= 7:
-        return f"Buy Setup {buy_setup}", "bull"
+        return f"Buy setup {buy_setup}", "bull"
     if sell_setup >= 7:
-        return f"Sell Setup {sell_setup}", "bear"
+        return f"Sell setup {sell_setup}", "bear"
     return "No exhaustion signal", "neutral"
 
 
@@ -435,7 +596,15 @@ def build_td_figure(df: pd.DataFrame) -> go.Figure:
     fig.add_trace(go.Scatter(x=view.index, y=view["MA200"], name="MA 200", line=dict(color="#111827", width=1.2, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=view.index, y=view["Senkou_Span_A"], mode="lines", line=dict(color="rgba(15,118,110,0.1)"), name="Cloud A"), row=1, col=1)
     fig.add_trace(
-        go.Scatter(x=view.index, y=view["Senkou_Span_B"], mode="lines", line=dict(color="rgba(180,35,24,0.1)"), fill="tonexty", fillcolor="rgba(245,158,11,0.10)", name="Ichimoku cloud"),
+        go.Scatter(
+            x=view.index,
+            y=view["Senkou_Span_B"],
+            mode="lines",
+            line=dict(color="rgba(180,35,24,0.1)"),
+            fill="tonexty",
+            fillcolor="rgba(245,158,11,0.10)",
+            name="Ichimoku cloud",
+        ),
         row=1,
         col=1,
     )
@@ -453,17 +622,8 @@ def build_td_figure(df: pd.DataFrame) -> go.Figure:
         if row["Sell_Countdown"] == 13:
             fig.add_annotation(x=idx, y=row["High"] * 1.02, text="SELL 13", showarrow=False, font=dict(color="#b42318", size=11), row=1, col=1)
 
-    fig.update_layout(
-        height=760,
-        margin=dict(l=24, r=24, t=48, b=16),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
-        title="TD Sequential with Trend Context",
-        xaxis_rangeslider_visible=False,
-        legend=dict(orientation="h", y=1.05, x=0),
-    )
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
-    return fig
+    return apply_figure_style(fig, title="TD Sequential with Trend Context", height=770)
+
 
 def calc_rsi_numpy(prices: pd.Series, period: int = 14) -> pd.Series:
     delta = prices.diff()
@@ -518,9 +678,12 @@ def calc_rolling_stl_enhanced(
     if trend_window % 2 == 0:
         trend_window += 1
 
-    log_prices = np.log(prices)
+    valid_prices = np.where(prices > 0, prices, np.nan)
+    log_prices = np.log(valid_prices)
     for cursor in range(min_history, count):
         current_log_data = log_prices[: cursor + 1]
+        if np.isnan(current_log_data).any():
+            continue
         extended_data = get_smart_extended_data(
             current_log_data,
             horizon=horizon,
@@ -594,7 +757,7 @@ def build_stl_figure(df: pd.DataFrame) -> go.Figure:
                 cmin=0,
                 cmax=100,
                 line=dict(width=0),
-                colorbar=dict(title="Cycle"),
+                colorbar=dict(title="Cycle", tickfont=dict(size=12)),
             ),
             line=dict(color="rgba(15,23,42,0.18)", width=1.2),
             name="Price",
@@ -602,20 +765,12 @@ def build_stl_figure(df: pd.DataFrame) -> go.Figure:
         row=1,
         col=1,
     )
-    fig.add_trace(go.Scatter(x=view.index, y=view["Trend"], name="STL trend", line=dict(color="#0f766e", width=2.0)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Trend"], name="STL trend", line=dict(color="#0f766e", width=2.1)), row=1, col=1)
     fig.add_trace(go.Scatter(x=view.index, y=view["Cycle_Score"], name="Cycle score", line=dict(color="#f59e0b", width=1.8)), row=2, col=1)
     fig.add_hrect(y0=0, y1=10, fillcolor="rgba(37,99,235,0.12)", line_width=0, row=2, col=1)
     fig.add_hrect(y0=90, y1=100, fillcolor="rgba(180,35,24,0.12)", line_width=0, row=2, col=1)
     fig.add_hline(y=50, line_dash="dot", line_color="#64748b", row=2, col=1)
-    fig.update_layout(
-        height=720,
-        margin=dict(l=24, r=24, t=48, b=16),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
-        title="Robust STL Cycle Dashboard",
-    )
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
-    return fig
+    return apply_figure_style(fig, title="Robust STL Cycle Dashboard", height=730)
 
 
 def get_vol_label(volume: float, vol_ma: float) -> str:
@@ -915,17 +1070,9 @@ def build_smc_figure(smc_data: dict[str, Any]) -> go.Figure:
             col=1,
         )
 
-    fig.update_layout(
-        height=980,
-        margin=dict(l=24, r=24, t=48, b=16),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
-        title="Smart Money Concepts",
-        xaxis_rangeslider_visible=False,
-    )
     fig.update_xaxes(range=[x0, x1], row=1, col=1)
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
-    return fig
+    return apply_figure_style(fig, title="Smart Money Concepts", height=990)
+
 
 def get_probability(series: pd.Series, window: int, inverse: bool = False) -> pd.Series:
     roll_mean = series.rolling(window=window).mean()
@@ -938,7 +1085,7 @@ def get_probability(series: pd.Series, window: int, inverse: bool = False) -> pd
 @st.cache_data(ttl=7200, show_spinner=False)
 def compute_market_fear_greed() -> dict[str, Any]:
     tickers = ["SPY", "^VIX", "HYG", "IEF", "RSP", "XLY", "XLP", "UUP"]
-    raw = yf.download(tickers, period="6y", progress=False, auto_adjust=False)
+    raw = yf.download(tickers, period="6y", progress=False, auto_adjust=False, threads=False)
     close_df = raw["Close"].copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
     close_df = close_df.ffill().dropna()
 
@@ -1026,52 +1173,10 @@ def build_market_figure(market_data: dict[str, Any]) -> go.Figure:
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["Breadth"], name="Breadth", line=dict(color="#dd6b20", width=1.8)), row=2, col=2)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["Sector"], name="Sector", line=dict(color="#2563eb", width=1.8)), row=2, col=2)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["Credit"], name="Credit", line=dict(color="#0f766e", width=1.8)), row=2, col=2)
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=[0.8] * len(plot_df),
-            mode="lines",
-            line=dict(color="#b42318", width=1, dash="dot"),
-            name="Greed threshold",
-            showlegend=False,
-        ),
-        row=1,
-        col=2,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=[0.2] * len(plot_df),
-            mode="lines",
-            line=dict(color="#0f766e", width=1, dash="dot"),
-            name="Fear threshold",
-            showlegend=False,
-        ),
-        row=1,
-        col=2,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=[0.5] * len(plot_df),
-            mode="lines",
-            line=dict(color="#64748b", width=1, dash="dot"),
-            name="Neutral threshold",
-            showlegend=False,
-        ),
-        row=2,
-        col=2,
-    )
-    fig.update_layout(
-        height=820,
-        margin=dict(l=24, r=24, t=64, b=16),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
-        legend=dict(orientation="h", y=1.08, x=0),
-        title="Macro Fear and Greed Dashboard",
-    )
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
-    return fig
+    fig.add_trace(go.Scatter(x=plot_df.index, y=[0.8] * len(plot_df), mode="lines", line=dict(color="#b42318", width=1, dash="dot"), showlegend=False), row=1, col=2)
+    fig.add_trace(go.Scatter(x=plot_df.index, y=[0.2] * len(plot_df), mode="lines", line=dict(color="#0f766e", width=1, dash="dot"), showlegend=False), row=1, col=2)
+    fig.add_trace(go.Scatter(x=plot_df.index, y=[0.5] * len(plot_df), mode="lines", line=dict(color="#64748b", width=1, dash="dot"), showlegend=False), row=2, col=2)
+    return apply_figure_style(fig, title="Macro Fear and Greed Dashboard", height=840, legend_y=1.08)
 
 
 def bs_greeks(S: float, K: float, T: float, r: float, q: float, sigma: float, option_type: str) -> dict[str, float]:
@@ -1091,7 +1196,7 @@ def bs_greeks(S: float, K: float, T: float, r: float, q: float, sigma: float, op
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_risk_free_rate() -> float:
     try:
-        irx = flatten_columns(yf.download("^IRX", period="5d", progress=False, auto_adjust=False))
+        irx = normalize_ohlcv_frame(yf.download("^IRX", period="5d", progress=False, auto_adjust=False, threads=False))
         return float(irx["Close"].iloc[-1] / 100) if not irx.empty else 0.04
     except Exception:
         return 0.04
@@ -1141,9 +1246,9 @@ def get_spx_expiries() -> list[str]:
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_vix_term_structure() -> dict[str, float]:
     try:
-        vix9d = flatten_columns(yf.download("^VIX9D", period="5d", progress=False, auto_adjust=False))
-        vix30d = flatten_columns(yf.download("^VIX", period="5d", progress=False, auto_adjust=False))
-        vix3m = flatten_columns(yf.download("^VIX3M", period="5d", progress=False, auto_adjust=False))
+        vix9d = normalize_ohlcv_frame(yf.download("^VIX9D", period="5d", progress=False, auto_adjust=False, threads=False))
+        vix30d = normalize_ohlcv_frame(yf.download("^VIX", period="5d", progress=False, auto_adjust=False, threads=False))
+        vix3m = normalize_ohlcv_frame(yf.download("^VIX3M", period="5d", progress=False, auto_adjust=False, threads=False))
         return {
             "vix9d": float(vix9d["Close"].iloc[-1]),
             "vix30d": float(vix30d["Close"].iloc[-1]),
@@ -1284,22 +1389,11 @@ def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure
         vertical_spacing=0.12,
         horizontal_spacing=0.08,
     )
-    fig.add_trace(go.Bar(x=view["strike"], y=view["gex"] / 1e9, marker_color="#2563eb", name="GEX (B)"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view["strike"], y=view["pain"], fill="tozeroy", line=dict(color="#b42318", width=2), name="Pain"), row=1, col=2)
-    fig.add_trace(go.Bar(x=view["strike"], y=view["vanna"] / 1e9, marker_color="#0f766e", name="Vanna (B)"), row=2, col=1)
-    fig.add_trace(go.Bar(x=view["strike"], y=view["charm"] / 1e6, marker_color="#dd6b20", name="Charm (M)"), row=2, col=2)
-    fig.add_trace(
-        go.Scatter(
-            x=["9D", "30D", "3M"],
-            y=[options_data["vix9d"], options_data["vix30d"], options_data["vix3m"]],
-            mode="lines+markers",
-            line=dict(width=3, color="#7c3aed"),
-            fill="tozeroy",
-            name="VIX curve",
-        ),
-        row=3,
-        col=1,
-    )
+    fig.add_trace(go.Bar(x=view["strike"], y=view["gex"] / 1e9, marker_color="#2563eb"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view["strike"], y=view["pain"], fill="tozeroy", line=dict(color="#b42318", width=2)), row=1, col=2)
+    fig.add_trace(go.Bar(x=view["strike"], y=view["vanna"] / 1e9, marker_color="#0f766e"), row=2, col=1)
+    fig.add_trace(go.Bar(x=view["strike"], y=view["charm"] / 1e6, marker_color="#dd6b20"), row=2, col=2)
+    fig.add_trace(go.Scatter(x=["9D", "30D", "3M"], y=[options_data["vix9d"], options_data["vix30d"], options_data["vix3m"]], mode="lines+markers", line=dict(width=3, color="#7c3aed"), fill="tozeroy"), row=3, col=1)
     fig.add_trace(
         go.Indicator(
             mode="gauge+number",
@@ -1318,51 +1412,14 @@ def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure
         row=3,
         col=2,
     )
-    x_values = view["strike"]
-    spot_line = [spot] * len(view)
-    max_pain_line = [options_data["max_pain"]] * len(view)
-    for y_series, row, col in [
-        (view["gex"] / 1e9, 1, 1),
-        (view["pain"], 1, 2),
-        (view["vanna"] / 1e9, 2, 1),
-        (view["charm"] / 1e6, 2, 2),
-    ]:
-        fig.add_trace(
-            go.Scatter(
-                x=spot_line,
-                y=np.linspace(float(np.nanmin(y_series)), float(np.nanmax(y_series)), len(view)),
-                mode="lines",
-                line=dict(color="#64748b", width=1, dash="dash"),
-                showlegend=False,
-                hoverinfo="skip",
-            ),
-            row=row,
-            col=col,
-        )
-    fig.add_trace(
-        go.Scatter(
-            x=max_pain_line,
-            y=np.linspace(float(np.nanmin(view["pain"])), float(np.nanmax(view["pain"])), len(view)),
-            mode="lines",
-            line=dict(color="#b42318", width=1, dash="dot"),
-            showlegend=False,
-            hoverinfo="skip",
-        ),
-        row=1,
-        col=2,
-    )
-    fig.update_layout(
-        height=960,
-        margin=dict(l=24, r=24, t=64, b=16),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
-        title=f"SPX Options Positioning ({options_data['expiry']})",
-        showlegend=False,
-    )
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.22)")
+
     for row, col in [(1, 1), (1, 2), (2, 1), (2, 2)]:
+        fig.add_vline(x=spot, line_color="#64748b", line_width=1, line_dash="dash", row=row, col=col)
         fig.update_xaxes(range=[options_data["lower_bound"], options_data["upper_bound"]], row=row, col=col)
-    return fig
+
+    fig.add_vline(x=options_data["max_pain"], line_color="#b42318", line_width=1, line_dash="dot", row=1, col=2)
+    return apply_figure_style(fig, title=f"SPX Options Positioning ({options_data['expiry']})", height=970, showlegend=False)
+
 
 def build_summary(
     ticker: str,
@@ -1415,7 +1472,7 @@ def render_header(summary: DashboardSummary, market_data: dict[str, Any], option
             <h1>{summary.ticker} Quant Fusion Dashboard</h1>
             <p>
                 One-click research board for price structure, Elder Impulse, TD Sequential,
-                STL cycle scoring, smart money zones, macro sentiment, and options flow.
+                robust STL cycle scoring, smart money zones, macro sentiment, and options flow.
                 Last refresh: {current_time}
             </p>
         </div>
@@ -1444,15 +1501,19 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str | None]:
     with st.sidebar.form("query_form"):
         st.subheader("Dashboard Controls")
         ticker = st.text_input("Ticker", value=st.session_state.get("ticker", default_ticker)).strip().upper()
-        period_options = ["1y", "2y"]
-        default_period = st.session_state.get("period", "2y")
-        period = st.selectbox("History window", options=period_options, index=period_options.index(default_period) if default_period in period_options else 2)
-        st.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, BTC-USD")
+        period_options = ["1y", "2y", "3y", "5y"]
+        default_period = st.session_state.get("period", "3y")
+        period = st.selectbox("History window", options=period_options, index=period_options.index(default_period) if default_period in period_options else period_options.index("3y"))
+        force_refresh = st.checkbox("Force refresh cached data", value=False)
+        st.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, 035420.KQ, BTC-USD")
+        st.caption("Korean equities accept both Yahoo suffixes and plain 6-digit codes.")
         submitted = st.form_submit_button("Run Dashboard", use_container_width=True)
 
     if submitted:
         st.session_state["ticker"] = ticker or default_ticker
         st.session_state["period"] = period
+        if force_refresh:
+            st.cache_data.clear()
 
     active_ticker = st.session_state.get("ticker", default_ticker)
     active_period = st.session_state.get("period", "3y")
@@ -1468,12 +1529,57 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str | None]:
     return active_ticker, active_period, selected_expiry
 
 
+def render_data_status(price_df: pd.DataFrame, price_source: str, price_symbol: str, stl_df: pd.DataFrame | None, stl_source: str, stl_symbol: str) -> None:
+    with st.sidebar.expander("Data diagnostics", expanded=False):
+        price_date = price_df.index[-1].strftime("%Y-%m-%d") if not price_df.empty else "n/a"
+        st.markdown(f'<span class="data-pill">Price: {price_source}</span>', unsafe_allow_html=True)
+        st.markdown(f'<span class="data-pill">Resolved: {price_symbol}</span>', unsafe_allow_html=True)
+        st.markdown(f'<span class="data-pill">Latest bar: {price_date}</span>', unsafe_allow_html=True)
+        if stl_df is not None and not stl_df.empty:
+            stl_date = stl_df.index[-1].strftime("%Y-%m-%d")
+            st.markdown(f'<span class="data-pill">STL: {stl_source}</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="data-pill">STL symbol: {stl_symbol}</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="data-pill">STL latest: {stl_date}</span>', unsafe_allow_html=True)
+        else:
+            st.warning("STL source could not return usable close data for this ticker.")
+
+
+def build_signal_stack(
+    elder_df: pd.DataFrame,
+    td_df: pd.DataFrame,
+    stl_df: pd.DataFrame | None,
+    smc_data: dict[str, Any],
+    market_data: dict[str, Any],
+    options_data: dict[str, Any] | None,
+) -> pd.DataFrame:
+    elder_text, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
+    td_text, _ = td_signal_label(td_df)
+    if stl_df is not None and not stl_df.dropna(subset=["Cycle_Score"]).empty:
+        stl_text, _ = stl_signal_label(float(stl_df.dropna(subset=["Cycle_Score"])["Cycle_Score"].iloc[-1]))
+    else:
+        stl_text = "Unavailable"
+    smc_text, _ = smc_signal_label(smc_data)
+    market_text, _ = market_data["status"]
+    options_text, _ = options_signal_label(options_data)
+    return pd.DataFrame(
+        [
+            {"Model": "Elder Impulse", "Signal": elder_text, "What it means": "Short-term momentum aligned with trend filter."},
+            {"Model": "TD Sequential", "Signal": td_text, "What it means": "Setup and countdown exhaustion context."},
+            {"Model": "Robust STL", "Signal": stl_text, "What it means": "Cycle stretch versus smoothed trend."},
+            {"Model": "SMC Bias", "Signal": smc_text, "What it means": "Location relative to value area and active zones."},
+            {"Model": "Macro Pulse", "Signal": market_text, "What it means": "Risk appetite backdrop from cross-asset internals."},
+            {"Model": "Options", "Signal": options_text, "What it means": "Dealer positioning and put/call flow read."},
+        ]
+    )
+
+
 def main() -> None:
+    configure_page()
     apply_custom_style()
     ticker, period, selected_expiry = render_sidebar(default_ticker="NVDA")
 
     with st.spinner(f"Loading data for {ticker}..."):
-        price_df = download_price_data(ticker, period=period)
+        price_df, price_source, price_symbol = download_price_data(ticker, period=period)
     if price_df.empty:
         st.error("No price history was returned. Check the ticker format and try again.")
         st.stop()
@@ -1481,7 +1587,7 @@ def main() -> None:
     with st.spinner("Computing dashboards..."):
         elder_df = compute_elder_impulse(price_df)
         td_df = compute_td_sequential(price_df)
-        stl_source_df = download_stl_data(ticker)
+        stl_source_df, stl_source, stl_symbol = download_stl_data(ticker)
         stl_df = compute_stl_cycle(stl_source_df) if not stl_source_df.empty else None
         smc_data = compute_smc(price_df)
         market_data = compute_market_fear_greed()
@@ -1489,36 +1595,50 @@ def main() -> None:
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
     render_header(summary, market_data, options_data)
-    st.markdown('<div class="section-note">The overview tab gives a fast read. The remaining tabs keep each model isolated so you can validate the signal instead of trusting a single composite number.</div>', unsafe_allow_html=True)
+    render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
+    st.markdown(
+        '<div class="section-note">The overview tab stays high signal on purpose. Each deeper tab isolates a model so you can validate where the read is coming from instead of trusting a single blended number.</div>',
+        unsafe_allow_html=True,
+    )
 
     tabs = st.tabs(["Overview", "Elder Impulse", "TD Sequential", "Robust STL", "SMC", "Market Pulse", "Options Flow"])
 
     with tabs[0]:
-        overview_cols = st.columns([1.6, 1])
+        overview_cols = st.columns([1.75, 1.05])
         with overview_cols[0]:
             st.plotly_chart(compute_overview_figure(price_df), use_container_width=True)
         with overview_cols[1]:
-            elder_text, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
-            td_text, _ = td_signal_label(td_df)
-            if stl_df is not None and not stl_df.dropna(subset=["Cycle_Score"]).empty:
-                stl_text, _ = stl_signal_label(float(stl_df.dropna(subset=["Cycle_Score"])["Cycle_Score"].iloc[-1]))
-            else:
-                stl_text = "Unavailable"
-            smc_text, _ = smc_signal_label(smc_data)
-            market_text, _ = market_data["status"]
-            options_text, _ = options_signal_label(options_data)
+            st.markdown('<div class="signal-panel">', unsafe_allow_html=True)
             st.subheader("Signal Stack")
-            st.write(f"**Elder Impulse:** {elder_text}")
-            st.write(f"**TD Sequential:** {td_text}")
-            st.write(f"**STL Cycle:** {stl_text}")
-            st.write(f"**SMC Bias:** {smc_text}")
-            st.write(f"**Macro Pulse:** {market_text}")
-            st.write(f"**Options Positioning:** {options_text}")
+            signal_df = build_signal_stack(elder_df, td_df, stl_df, smc_data, market_data, options_data)
+            st.dataframe(
+                signal_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Model": st.column_config.TextColumn(width="small"),
+                    "Signal": st.column_config.TextColumn(width="medium"),
+                    "What it means": st.column_config.TextColumn(width="large"),
+                },
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
             latest = price_df.tail(10).copy()
             latest["Return %"] = latest["Close"].pct_change().mul(100)
             st.subheader("Recent Tape")
-            st.dataframe(latest[["Open", "High", "Low", "Close", "Volume", "Return %"]].round({"Open": 2, "High": 2, "Low": 2, "Close": 2, "Return %": 2}), use_container_width=True, hide_index=False)
+            st.dataframe(
+                latest[["Open", "High", "Low", "Close", "Volume", "Return %"]],
+                use_container_width=True,
+                hide_index=False,
+                column_config={
+                    "Open": st.column_config.NumberColumn(format="%.2f"),
+                    "High": st.column_config.NumberColumn(format="%.2f"),
+                    "Low": st.column_config.NumberColumn(format="%.2f"),
+                    "Close": st.column_config.NumberColumn(format="%.2f"),
+                    "Volume": st.column_config.NumberColumn(format="%d"),
+                    "Return %": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
 
     with tabs[1]:
         st.plotly_chart(build_elder_figure(elder_df), use_container_width=True)
@@ -1528,12 +1648,28 @@ def main() -> None:
 
     with tabs[3]:
         if stl_df is None or stl_df.dropna(subset=["Trend", "Cycle_Score"]).empty:
-            st.info("Robust STL data could not be loaded with the original FinanceDataReader workflow for this ticker.")
+            st.info("Robust STL could not build a valid cycle series for this ticker after trying both FinanceDataReader and Yahoo Finance.")
         else:
+            st.caption(f"STL source: {stl_source} via `{stl_symbol}`")
             st.plotly_chart(build_stl_figure(stl_df), use_container_width=True)
 
     with tabs[4]:
-        st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
+        smc_cols = st.columns([1.65, 0.95])
+        with smc_cols[0]:
+            st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
+        with smc_cols[1]:
+            st.subheader("Active zones")
+            if smc_data["zones_table"].empty:
+                st.info("No active order block or fair value gap survived the current filter.")
+            else:
+                st.dataframe(
+                    smc_data["zones_table"],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Distance %": st.column_config.NumberColumn(format="%.2f"),
+                    },
+                )
 
     with tabs[5]:
         st.plotly_chart(build_market_figure(market_data), use_container_width=True)
@@ -1553,11 +1689,8 @@ def main() -> None:
                 render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e9:,.2f}B", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
             st.plotly_chart(build_options_figure(options_data, options_data["spot"]), use_container_width=True)
 
-    st.caption("Data source: Yahoo Finance. Options analytics depend on listed option availability and delayed data.")
+    st.caption("Data sources: Yahoo Finance, FinanceDataReader, CBOE delayed quotes. Options analytics depend on listed option availability and delayed data quality.")
 
 
 if __name__ == "__main__":
     main()
-
-
-
