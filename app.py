@@ -36,13 +36,15 @@ def fetch_stock_data(ticker, days=600):
 
 @st.cache_data(ttl=3600)
 def fetch_macro_data():
-    tickers = ['SPY', '^VIX', 'HYG', 'IEF', 'RSP', 'XLY', 'XLP', 'DX-Y.NYB']
+    # DX-Y.NYB 대신 데이터 수신이 안정적인 달러 선물(DX=F) 사용
+    tickers = ['SPY', '^VIX', 'HYG', 'IEF', 'RSP', 'XLY', 'XLP', 'DX=F']
     data = yf.download(tickers, start='2020-01-01', progress=False)
     if isinstance(data.columns, pd.MultiIndex):
         df = data['Close'].copy()
     else:
         df = data.copy()
-    return df.ffill().dropna()
+    # ffill(앞 값으로 채우기) 후 bfill(뒷 값으로 채우기)까지 적용하여 데이터 증발 원천 차단
+    return df.ffill().bfill()
 
 # ==========================================
 # 🧮 1. TD Sequential 로직
@@ -302,16 +304,19 @@ def calc_smart_money_index():
     factors['Sector']   = get_probability(df['F_Sector'], window)
     factors['Credit']   = get_probability(df['F_Credit'], window)
     factors['VIX_Inv']  = get_probability(df['^VIX'], window, inverse=True)
-    factors['DXY_Inv']  = get_probability(df['DX-Y.NYB'], window, inverse=True)
-
+    factors['DXY_Inv']  = get_probability(df['DX=F'], window, inverse=True)
+    
     final_score = (
         0.10 * factors['BB_Pos'] + 0.10 * factors['RSI_Mom'] + 0.10 * factors['MA125_Div'] +
         0.15 * factors['Breadth'] + 0.15 * factors['Sector'] + 0.10 * factors['Credit'] +
         0.15 * factors['VIX_Inv'] + 0.15 * factors['DXY_Inv']
     )
     df['Smart_Score'] = final_score
-    return df.dropna().tail(300), factors.dropna().tail(300)
-
+    valid_df = df.dropna(subset=['Smart_Score'])
+    valid_factors = factors.loc[valid_df.index]
+    
+    return valid_df.tail(300), valid_factors.tail(300)
+    
 def plot_smart_money_chart(plot_df, factors):
     fig = plt.figure(figsize=(16, 10))
     fig.patch.set_facecolor(DARK_COLOR)
@@ -373,21 +378,26 @@ with tab1:
     st.markdown("### 🌐 스마트 머니 공포/탐욕 인덱스 (S&P 500 기반)")
     with st.spinner('매크로 데이터를 연산 중입니다...'):
         sm_df, sm_factors = calc_smart_money_index()
-        last_score = sm_df['Smart_Score'].iloc[-1]
         
-        # 상태에 따른 색상 및 메세지
-        if last_score > 0.8: status, color = "🔴 Extreme Greed (과매수/매도 검토)", "red"
-        elif last_score > 0.6: status, color = "🟠 Greed (탐욕)", "orange"
-        elif last_score < 0.2: status, color = "🟢 Extreme Fear (극단적 공포/분할 매수)", "green"
-        elif last_score < 0.4: status, color = "🔵 Fear (공포)", "blue"
-        else: status, color = "⚪ Neutral (중립)", "gray"
+        # [수정] 데이터가 비어있을 경우를 대비한 방어 로직
+        if sm_df.empty:
+            st.error("⚠️ 야후 파이낸스 통신 오류로 데이터를 불러오지 못했습니다. 잠시 후 새로고침 해주세요.")
+        else:
+            last_score = sm_df['Smart_Score'].iloc[-1]
+            
+            # 상태에 따른 색상 및 메세지
+            if last_score > 0.8: status, color = "🔴 Extreme Greed (과매수/매도 검토)", "red"
+            elif last_score > 0.6: status, color = "🟠 Greed (탐욕)", "orange"
+            elif last_score < 0.2: status, color = "🟢 Extreme Fear (극단적 공포/분할 매수)", "green"
+            elif last_score < 0.4: status, color = "🔵 Fear (공포)", "blue"
+            else: status, color = "⚪ Neutral (중립)", "gray"
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("종합 Smart Score", f"{last_score:.2f} / 1.00")
-        col2.markdown(f"**현재 시장 상태:**<br><span style='color:{color}; font-size:1.5rem; font-weight:bold;'>{status}</span>", unsafe_allow_html=True)
-        col3.metric("기준일", sm_df.index[-1].strftime('%Y-%m-%d'))
-        
-        st.pyplot(plot_smart_money_chart(sm_df, sm_factors))
+            col1, col2, col3 = st.columns(3)
+            col1.metric("종합 Smart Score", f"{last_score:.2f} / 1.00")
+            col2.markdown(f"**현재 시장 상태:**<br><span style='color:{color}; font-size:1.5rem; font-weight:bold;'>{status}</span>", unsafe_allow_html=True)
+            col3.metric("기준일", sm_df.index[-1].strftime('%Y-%m-%d'))
+            
+            st.pyplot(plot_smart_money_chart(sm_df, sm_factors))
 
 # 2. TD Sequential
 with tab2:
