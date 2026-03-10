@@ -779,7 +779,7 @@ def smc_signal_label(smc_data: dict[str, Any]) -> tuple[str, str]:
 
 def build_smc_figure(smc_data: dict[str, Any]) -> go.Figure:
     view = smc_data["view"]
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.05)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.82, 0.18], vertical_spacing=0.04)
     fig.add_trace(
         go.Candlestick(
             x=view.index,
@@ -916,7 +916,7 @@ def build_smc_figure(smc_data: dict[str, Any]) -> go.Figure:
         )
 
     fig.update_layout(
-        height=760,
+        height=980,
         margin=dict(l=24, r=24, t=48, b=16),
         paper_bgcolor="rgba(255,255,255,0.0)",
         plot_bgcolor="rgba(255,255,255,0.0)",
@@ -1533,23 +1533,7 @@ def main() -> None:
             st.plotly_chart(build_stl_figure(stl_df), use_container_width=True)
 
     with tabs[4]:
-        smc_cols = st.columns([1.8, 1])
-        with smc_cols[0]:
-            st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
-        with smc_cols[1]:
-            st.subheader("Active Zones")
-            if smc_data["zones_table"].empty:
-                st.info("No active order block or FVG zone was detected in the current window.")
-            else:
-                st.dataframe(smc_data["zones_table"], use_container_width=True, hide_index=True)
-
-            st.subheader("Value Area")
-            poc_price = smc_data["poc_price"]
-            if np.isnan(poc_price):
-                st.write("POC could not be estimated for the current sample.")
-            else:
-                st.write(f"Point of control: **{poc_price:,.2f}**")
-                st.write(f"Last close vs POC: **{(price_df['Close'].iloc[-1] / poc_price - 1) * 100:+.2f}%**")
+        st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
 
     with tabs[5]:
         st.plotly_chart(build_market_figure(market_data), use_container_width=True)
