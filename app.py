@@ -25,7 +25,7 @@ PLOT_FONT = {
 }
 GRID_COLOR = "rgba(71, 85, 105, 0.18)"
 KOREAN_SUFFIX_PATTERN = re.compile(r"^(?P<code>\d{6})\.(KS|KQ)$", re.IGNORECASE)
-DASHBOARD_VIEWS = ["Overview", "Elder Impulse", "TD Sequential", "Robust STL", "SMC", "Market Pulse", "Options Flow"]
+DASHBOARD_VIEWS = ["Elder Impulse", "TD Sequential", "Robust STL", "SMC", "Market Pulse", "Options Flow"]
 
 
 @dataclass
@@ -1496,18 +1496,35 @@ def format_pct(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.2f}%"
 
 
-def render_header(summary: DashboardSummary, market_data: dict[str, Any] | None, options_data: dict[str, Any] | None) -> None:
-    market_status, market_tone = market_data["status"] if market_data else ("Macro pulse not loaded", "neutral")
-    options_status, options_tone = options_signal_label(options_data)
+def render_header(summary: DashboardSummary, active_view: str, market_data: dict[str, Any] | None, options_data: dict[str, Any] | None) -> None:
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    view_status_map = {
+        "Elder Impulse": (summary.elder_label, "Momentum and trend filter status."),
+        "TD Sequential": (summary.td_label, "Setup and countdown exhaustion context."),
+        "Robust STL": (summary.stl_label, "Cycle stretch versus smoothed trend."),
+        "SMC": ("Loaded", "Smart money zones and active structures."),
+        "Market Pulse": (market_data["status"][0] if market_data else "Not loaded", "Cross-asset risk appetite backdrop."),
+        "Options Flow": (options_signal_label(options_data)[0], f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"),
+    }
+    active_status, active_subtitle = view_status_map.get(active_view, ("Loaded", ""))
+    active_tone = "neutral"
+    if active_view == "Elder Impulse":
+        active_tone = "bull" if "Bullish" in summary.elder_label else "bear" if "Bearish" in summary.elder_label else "neutral"
+    elif active_view == "TD Sequential":
+        active_tone = "bull" if "Buy" in summary.td_label else "bear" if "Sell" in summary.td_label else "neutral"
+    elif active_view == "Robust STL":
+        active_tone = "bull" if "Bull" in summary.stl_label else "bear" if "Bear" in summary.stl_label else "neutral"
+    elif active_view == "Market Pulse" and market_data:
+        active_tone = market_data["status"][1]
+    elif active_view == "Options Flow":
+        active_tone = options_signal_label(options_data)[1]
 
     st.markdown(
         f"""
         <div class="hero">
-            <h1>{summary.ticker} Quant Fusion Dashboard</h1>
+            <h1>{summary.ticker} · {active_view}</h1>
             <p>
-                One-click research board for price structure, Elder Impulse, TD Sequential,
-                robust STL cycle scoring, smart money zones, macro sentiment, and options flow.
+                Selected module only. Controls apply immediately when changed.
                 Last refresh: {current_time}
             </p>
         </div>
@@ -1515,7 +1532,7 @@ def render_header(summary: DashboardSummary, market_data: dict[str, Any] | None,
         unsafe_allow_html=True,
     )
 
-    cards = st.columns(6)
+    cards = st.columns(4)
     with cards[0]:
         render_metric_card("Last Close", f"{summary.last_close:,.2f}", f"1D move {format_pct(summary.daily_change)}", tone_from_return(summary.daily_change))
     with cards[1]:
@@ -1523,51 +1540,60 @@ def render_header(summary: DashboardSummary, market_data: dict[str, Any] | None,
     with cards[2]:
         render_metric_card("1Q Return", format_pct(summary.quarter_change), "63 trading days", tone_from_return(summary.quarter_change))
     with cards[3]:
-        elder_tone = "bull" if "Bullish" in summary.elder_label else "bear" if "Bearish" in summary.elder_label else "neutral"
-        render_metric_card("Elder", summary.elder_label, summary.td_label, elder_tone)
-    with cards[4]:
-        render_metric_card("STL Cycle", summary.stl_label, market_status, market_tone)
-    with cards[5]:
-        subtitle = f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"
-        render_metric_card("Options Flow", options_status, subtitle, options_tone)
-
+        render_metric_card(active_view, active_status, active_subtitle, active_tone)
 
 def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict[str, Any] | None]:
-    with st.sidebar.form("query_form"):
-        st.subheader("Dashboard Controls")
-        ticker = st.text_input("Ticker", value=st.session_state.get("ticker", default_ticker)).strip().upper()
-        period_options = ["1y", "2y", "3y", "5y"]
-        default_period = st.session_state.get("period", "3y")
-        period = st.selectbox("History window", options=period_options, index=period_options.index(default_period) if default_period in period_options else period_options.index("3y"))
-        default_view = st.session_state.get("dashboard_view", "Overview")
-        active_view = st.selectbox("View", options=DASHBOARD_VIEWS, index=DASHBOARD_VIEWS.index(default_view) if default_view in DASHBOARD_VIEWS else 0)
-        force_refresh = st.checkbox("Force refresh cached data", value=False)
-        st.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, 035420.KQ, BTC-USD")
-        st.caption("Korean equities accept both Yahoo suffixes and plain 6-digit codes.")
-        submitted = st.form_submit_button("Run Dashboard", use_container_width=True)
+    st.sidebar.subheader("Dashboard Controls")
 
-    if submitted:
-        st.session_state["ticker"] = ticker or default_ticker
-        st.session_state["period"] = period
-        st.session_state["dashboard_view"] = active_view
-        if force_refresh:
-            st.cache_data.clear()
+    ticker = st.sidebar.text_input(
+        "Ticker",
+        value=st.session_state.get("ticker", default_ticker),
+        key="ticker_input",
+    ).strip().upper()
+    period_options = ["1y", "2y", "3y", "5y"]
+    default_period = st.session_state.get("period", "3y")
+    period = st.sidebar.selectbox(
+        "History window",
+        options=period_options,
+        index=period_options.index(default_period) if default_period in period_options else period_options.index("3y"),
+        key="period_select",
+    )
+    default_view = st.session_state.get("dashboard_view", DASHBOARD_VIEWS[0])
+    active_view = st.sidebar.selectbox(
+        "View",
+        options=DASHBOARD_VIEWS,
+        index=DASHBOARD_VIEWS.index(default_view) if default_view in DASHBOARD_VIEWS else 0,
+        key="dashboard_view_select",
+    )
+    force_refresh = st.sidebar.checkbox("Force refresh cached data", value=False, key="force_refresh_toggle")
+    if force_refresh:
+        st.cache_data.clear()
+        st.session_state["force_refresh_toggle"] = False
+    st.sidebar.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, 035420.KQ, BTC-USD")
+    st.sidebar.caption("Korean equities accept both Yahoo suffixes and plain 6-digit codes.")
 
-    active_ticker = st.session_state.get("ticker", default_ticker)
-    active_period = st.session_state.get("period", "3y")
-    active_view = st.session_state.get("dashboard_view", "Overview")
+    active_ticker = ticker or default_ticker
+    active_period = period
+    st.session_state["ticker"] = active_ticker
+    st.session_state["period"] = active_period
+    st.session_state["dashboard_view"] = active_view
+
     selected_expiry = None
     spx_payload = fetch_spx_options_payload()
     spx_expiries = extract_spx_expiries(spx_payload)
     if spx_expiries:
         saved_expiry = st.session_state.get("selected_spx_expiry")
         default_index = spx_expiries.index(saved_expiry) if saved_expiry in spx_expiries else 0
-        selected_expiry = st.sidebar.selectbox("SPX option expiry", options=spx_expiries, index=default_index)
+        selected_expiry = st.sidebar.selectbox(
+            "SPX option expiry",
+            options=spx_expiries,
+            index=default_index,
+            key="selected_spx_expiry_select",
+        )
         st.session_state["selected_spx_expiry"] = selected_expiry
     else:
         st.sidebar.caption("SPX option chain is temporarily unavailable.")
     return active_ticker, active_period, active_view, selected_expiry, spx_payload
-
 
 def render_data_status(price_df: pd.DataFrame, price_source: str, price_symbol: str, stl_df: pd.DataFrame | None, stl_source: str, stl_symbol: str) -> None:
     with st.sidebar.expander("Data diagnostics", expanded=False):
@@ -1581,7 +1607,7 @@ def render_data_status(price_df: pd.DataFrame, price_source: str, price_symbol: 
             st.markdown(f'<span class="data-pill">STL symbol: {stl_symbol}</span>', unsafe_allow_html=True)
             st.markdown(f'<span class="data-pill">STL latest: {stl_date}</span>', unsafe_allow_html=True)
         elif stl_source == "Not loaded":
-            st.caption("STL diagnostics load only when Overview or Robust STL is selected.")
+            st.caption("STL diagnostics load only when Robust STL is selected.")
         else:
             st.warning("STL source could not return usable close data for this ticker.")
 
@@ -1634,13 +1660,12 @@ def main() -> None:
         st.error("No price history was returned. Check the ticker format and try again.")
         st.stop()
 
-    needs_overview = active_view == "Overview"
-    need_elder = needs_overview or active_view == "Elder Impulse"
-    need_td = needs_overview or active_view == "TD Sequential"
-    need_stl = needs_overview or active_view == "Robust STL"
-    need_smc = needs_overview or active_view == "SMC"
-    need_market = needs_overview or active_view == "Market Pulse"
-    need_options = needs_overview or active_view == "Options Flow"
+    need_elder = active_view == "Elder Impulse"
+    need_td = active_view == "TD Sequential"
+    need_stl = active_view == "Robust STL"
+    need_smc = active_view == "SMC"
+    need_market = active_view == "Market Pulse"
+    need_options = active_view == "Options Flow"
 
     with st.spinner("Computing dashboards..."):
         elder_df = compute_elder_impulse(price_df) if need_elder else None
@@ -1656,50 +1681,14 @@ def main() -> None:
         options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
-    render_header(summary, market_data, options_data)
+    render_header(summary, active_view, market_data, options_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     st.markdown(
-        f'<div class="section-note">Active view: <strong>{active_view}</strong>. The sidebar now controls which model is computed so deeper analytics are fetched only when you select them.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view}</strong>. Controls apply immediately when you change them.</div>',
         unsafe_allow_html=True,
     )
 
-    if active_view == "Overview":
-        overview_cols = st.columns([1.75, 1.05])
-        with overview_cols[0]:
-            st.plotly_chart(compute_overview_figure(price_df), use_container_width=True)
-        with overview_cols[1]:
-            st.markdown('<div class="signal-panel">', unsafe_allow_html=True)
-            st.subheader("Signal Stack")
-            signal_df = build_signal_stack(elder_df, td_df, stl_df, smc_data, market_data, options_data)
-            st.dataframe(
-                signal_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Model": st.column_config.TextColumn(width="small"),
-                    "Signal": st.column_config.TextColumn(width="medium"),
-                    "What it means": st.column_config.TextColumn(width="large"),
-                },
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            latest = price_df.tail(10).copy()
-            latest["Return %"] = latest["Close"].pct_change().mul(100)
-            st.subheader("Recent Tape")
-            st.dataframe(
-                latest[["Open", "High", "Low", "Close", "Volume", "Return %"]],
-                use_container_width=True,
-                hide_index=False,
-                column_config={
-                    "Open": st.column_config.NumberColumn(format="%.2f"),
-                    "High": st.column_config.NumberColumn(format="%.2f"),
-                    "Low": st.column_config.NumberColumn(format="%.2f"),
-                    "Close": st.column_config.NumberColumn(format="%.2f"),
-                    "Volume": st.column_config.NumberColumn(format="%d"),
-                    "Return %": st.column_config.NumberColumn(format="%.2f"),
-                },
-            )
-    elif active_view == "Elder Impulse":
+    if active_view == "Elder Impulse":
         st.plotly_chart(build_elder_figure(elder_df), use_container_width=True)
     elif active_view == "TD Sequential":
         st.plotly_chart(build_td_figure(td_df), use_container_width=True)
@@ -1748,6 +1737,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
 
