@@ -25,6 +25,7 @@ PLOT_FONT = {
 }
 GRID_COLOR = "rgba(71, 85, 105, 0.18)"
 KOREAN_SUFFIX_PATTERN = re.compile(r"^(?P<code>\d{6})\.(KS|KQ)$", re.IGNORECASE)
+DASHBOARD_VIEWS = ["Overview", "Elder Impulse", "TD Sequential", "Robust STL", "SMC", "Market Pulse", "Options Flow"]
 
 
 @dataclass
@@ -1219,6 +1220,18 @@ def fetch_spx_options_payload() -> dict[str, Any] | None:
         return None
 
 
+def extract_spx_expiries(payload: dict[str, Any] | None) -> list[str]:
+    if not payload:
+        return []
+    options = payload.get("data", {}).get("options", [])
+    expiries = set()
+    for item in options:
+        parsed = parse_spx_option_symbol(item.get("option", ""))
+        if parsed:
+            expiries.add(parsed[0])
+    return sorted(expiries)
+
+
 def parse_spx_option_symbol(symbol: str) -> tuple[str, str, float] | None:
     match = re.search(r"(\d{6})([CP])(\d{8})$", symbol)
     if not match:
@@ -1231,16 +1244,7 @@ def parse_spx_option_symbol(symbol: str) -> tuple[str, str, float] | None:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_spx_expiries() -> list[str]:
-    payload = fetch_spx_options_payload()
-    if not payload:
-        return []
-    options = payload.get("data", {}).get("options", [])
-    expiries = set()
-    for item in options:
-        parsed = parse_spx_option_symbol(item.get("option", ""))
-        if parsed:
-            expiries.add(parsed[0])
-    return sorted(expiries)
+    return extract_spx_expiries(fetch_spx_options_payload())
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -1258,15 +1262,19 @@ def get_vix_term_structure() -> dict[str, float]:
         return {"vix9d": 18.0, "vix30d": 19.0, "vix3m": 20.0}
 
 
-def compute_options_analytics(expiry: str | None = None, spot_range_pct: float = 0.15) -> dict[str, Any] | None:
-    payload = fetch_spx_options_payload()
+def compute_options_analytics(
+    expiry: str | None = None,
+    spot_range_pct: float = 0.15,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    payload = payload or fetch_spx_options_payload()
     if not payload:
         return None
 
     data = payload.get("data", {})
     spot = float(data.get("current_price") or data.get("close") or 0)
     option_rows = data.get("options", [])
-    expiries = get_spx_expiries()
+    expiries = extract_spx_expiries(payload)
     if not spot or not expiries:
         return None
 
@@ -1413,29 +1421,56 @@ def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure
         col=2,
     )
 
+    for axis_id in [1, 2, 3, 4]:
+        xref = "x" if axis_id == 1 else f"x{axis_id}"
+        yref = "y domain" if axis_id == 1 else f"y{axis_id} domain"
+        fig.add_shape(
+            type="line",
+            x0=spot,
+            x1=spot,
+            y0=0,
+            y1=1,
+            xref=xref,
+            yref=yref,
+            line=dict(color="#64748b", width=1, dash="dash"),
+        )
     for row, col in [(1, 1), (1, 2), (2, 1), (2, 2)]:
-        fig.add_vline(x=spot, line_color="#64748b", line_width=1, line_dash="dash", row=row, col=col)
         fig.update_xaxes(range=[options_data["lower_bound"], options_data["upper_bound"]], row=row, col=col)
 
-    fig.add_vline(x=options_data["max_pain"], line_color="#b42318", line_width=1, line_dash="dot", row=1, col=2)
+    fig.add_shape(
+        type="line",
+        x0=options_data["max_pain"],
+        x1=options_data["max_pain"],
+        y0=0,
+        y1=1,
+        xref="x2",
+        yref="y2 domain",
+        line=dict(color="#b42318", width=1, dash="dot"),
+    )
     return apply_figure_style(fig, title=f"SPX Options Positioning ({options_data['expiry']})", height=970, showlegend=False)
 
 
 def build_summary(
     ticker: str,
     price_df: pd.DataFrame,
-    elder_df: pd.DataFrame,
-    td_df: pd.DataFrame,
+    elder_df: pd.DataFrame | None,
+    td_df: pd.DataFrame | None,
     stl_df: pd.DataFrame | None,
-    market_data: dict[str, Any],
+    market_data: dict[str, Any] | None,
     options_data: dict[str, Any] | None,
 ) -> DashboardSummary:
-    elder_label, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
-    td_label, _ = td_signal_label(td_df)
-    stl_label = "Unavailable"
+    elder_label = "Not loaded"
+    if elder_df is not None and not elder_df.empty:
+        elder_label, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
+    td_label = "Not loaded"
+    if td_df is not None and not td_df.empty:
+        td_label, _ = td_signal_label(td_df)
+    stl_label = "Not loaded"
     if stl_df is not None and not stl_df.dropna(subset=["Cycle_Score"]).empty:
         stl_label, _ = stl_signal_label(float(stl_df.dropna(subset=["Cycle_Score"])["Cycle_Score"].iloc[-1]))
-    market_label, _ = market_data["status"]
+    market_label = "Not loaded"
+    if market_data is not None:
+        market_label, _ = market_data["status"]
     options_label, _ = options_signal_label(options_data)
     return DashboardSummary(
         ticker=ticker,
@@ -1461,8 +1496,8 @@ def format_pct(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.2f}%"
 
 
-def render_header(summary: DashboardSummary, market_data: dict[str, Any], options_data: dict[str, Any] | None) -> None:
-    market_status, market_tone = market_data["status"]
+def render_header(summary: DashboardSummary, market_data: dict[str, Any] | None, options_data: dict[str, Any] | None) -> None:
+    market_status, market_tone = market_data["status"] if market_data else ("Macro pulse not loaded", "neutral")
     options_status, options_tone = options_signal_label(options_data)
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -1497,13 +1532,15 @@ def render_header(summary: DashboardSummary, market_data: dict[str, Any], option
         render_metric_card("Options Flow", options_status, subtitle, options_tone)
 
 
-def render_sidebar(default_ticker: str) -> tuple[str, str, str | None]:
+def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict[str, Any] | None]:
     with st.sidebar.form("query_form"):
         st.subheader("Dashboard Controls")
         ticker = st.text_input("Ticker", value=st.session_state.get("ticker", default_ticker)).strip().upper()
         period_options = ["1y", "2y", "3y", "5y"]
         default_period = st.session_state.get("period", "3y")
         period = st.selectbox("History window", options=period_options, index=period_options.index(default_period) if default_period in period_options else period_options.index("3y"))
+        default_view = st.session_state.get("dashboard_view", "Overview")
+        active_view = st.selectbox("View", options=DASHBOARD_VIEWS, index=DASHBOARD_VIEWS.index(default_view) if default_view in DASHBOARD_VIEWS else 0)
         force_refresh = st.checkbox("Force refresh cached data", value=False)
         st.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, 035420.KQ, BTC-USD")
         st.caption("Korean equities accept both Yahoo suffixes and plain 6-digit codes.")
@@ -1512,13 +1549,16 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str | None]:
     if submitted:
         st.session_state["ticker"] = ticker or default_ticker
         st.session_state["period"] = period
+        st.session_state["dashboard_view"] = active_view
         if force_refresh:
             st.cache_data.clear()
 
     active_ticker = st.session_state.get("ticker", default_ticker)
     active_period = st.session_state.get("period", "3y")
+    active_view = st.session_state.get("dashboard_view", "Overview")
     selected_expiry = None
-    spx_expiries = get_spx_expiries()
+    spx_payload = fetch_spx_options_payload()
+    spx_expiries = extract_spx_expiries(spx_payload)
     if spx_expiries:
         saved_expiry = st.session_state.get("selected_spx_expiry")
         default_index = spx_expiries.index(saved_expiry) if saved_expiry in spx_expiries else 0
@@ -1526,7 +1566,7 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str | None]:
         st.session_state["selected_spx_expiry"] = selected_expiry
     else:
         st.sidebar.caption("SPX option chain is temporarily unavailable.")
-    return active_ticker, active_period, selected_expiry
+    return active_ticker, active_period, active_view, selected_expiry, spx_payload
 
 
 def render_data_status(price_df: pd.DataFrame, price_source: str, price_symbol: str, stl_df: pd.DataFrame | None, stl_source: str, stl_symbol: str) -> None:
@@ -1540,26 +1580,36 @@ def render_data_status(price_df: pd.DataFrame, price_source: str, price_symbol: 
             st.markdown(f'<span class="data-pill">STL: {stl_source}</span>', unsafe_allow_html=True)
             st.markdown(f'<span class="data-pill">STL symbol: {stl_symbol}</span>', unsafe_allow_html=True)
             st.markdown(f'<span class="data-pill">STL latest: {stl_date}</span>', unsafe_allow_html=True)
+        elif stl_source == "Not loaded":
+            st.caption("STL diagnostics load only when Overview or Robust STL is selected.")
         else:
             st.warning("STL source could not return usable close data for this ticker.")
 
 
 def build_signal_stack(
-    elder_df: pd.DataFrame,
-    td_df: pd.DataFrame,
+    elder_df: pd.DataFrame | None,
+    td_df: pd.DataFrame | None,
     stl_df: pd.DataFrame | None,
-    smc_data: dict[str, Any],
-    market_data: dict[str, Any],
+    smc_data: dict[str, Any] | None,
+    market_data: dict[str, Any] | None,
     options_data: dict[str, Any] | None,
 ) -> pd.DataFrame:
-    elder_text, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
-    td_text, _ = td_signal_label(td_df)
+    elder_text = "Not loaded"
+    if elder_df is not None and not elder_df.empty:
+        elder_text, _ = elder_signal_label(int(elder_df["Impulse_State"].iloc[-1]), bool(elder_df["Long_Term_Up"].iloc[-1]))
+    td_text = "Not loaded"
+    if td_df is not None and not td_df.empty:
+        td_text, _ = td_signal_label(td_df)
     if stl_df is not None and not stl_df.dropna(subset=["Cycle_Score"]).empty:
         stl_text, _ = stl_signal_label(float(stl_df.dropna(subset=["Cycle_Score"])["Cycle_Score"].iloc[-1]))
     else:
-        stl_text = "Unavailable"
-    smc_text, _ = smc_signal_label(smc_data)
-    market_text, _ = market_data["status"]
+        stl_text = "Not loaded" if stl_df is None else "Unavailable"
+    smc_text = "Not loaded"
+    if smc_data is not None:
+        smc_text, _ = smc_signal_label(smc_data)
+    market_text = "Not loaded"
+    if market_data is not None:
+        market_text, _ = market_data["status"]
     options_text, _ = options_signal_label(options_data)
     return pd.DataFrame(
         [
@@ -1576,7 +1626,7 @@ def build_signal_stack(
 def main() -> None:
     configure_page()
     apply_custom_style()
-    ticker, period, selected_expiry = render_sidebar(default_ticker="NVDA")
+    ticker, period, active_view, selected_expiry, spx_payload = render_sidebar(default_ticker="NVDA")
 
     with st.spinner(f"Loading data for {ticker}..."):
         price_df, price_source, price_symbol = download_price_data(ticker, period=period)
@@ -1584,26 +1634,36 @@ def main() -> None:
         st.error("No price history was returned. Check the ticker format and try again.")
         st.stop()
 
+    needs_overview = active_view == "Overview"
+    need_elder = needs_overview or active_view == "Elder Impulse"
+    need_td = needs_overview or active_view == "TD Sequential"
+    need_stl = needs_overview or active_view == "Robust STL"
+    need_smc = needs_overview or active_view == "SMC"
+    need_market = needs_overview or active_view == "Market Pulse"
+    need_options = needs_overview or active_view == "Options Flow"
+
     with st.spinner("Computing dashboards..."):
-        elder_df = compute_elder_impulse(price_df)
-        td_df = compute_td_sequential(price_df)
-        stl_source_df, stl_source, stl_symbol = download_stl_data(ticker)
-        stl_df = compute_stl_cycle(stl_source_df) if not stl_source_df.empty else None
-        smc_data = compute_smc(price_df)
-        market_data = compute_market_fear_greed()
-        options_data = compute_options_analytics(expiry=selected_expiry)
+        elder_df = compute_elder_impulse(price_df) if need_elder else None
+        td_df = compute_td_sequential(price_df) if need_td else None
+        stl_source_df = pd.DataFrame()
+        stl_source = "Not loaded"
+        stl_symbol = "n/a"
+        if need_stl:
+            stl_source_df, stl_source, stl_symbol = download_stl_data(ticker)
+        stl_df = compute_stl_cycle(stl_source_df) if need_stl and not stl_source_df.empty else None
+        smc_data = compute_smc(price_df) if need_smc else None
+        market_data = compute_market_fear_greed() if need_market else None
+        options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
     render_header(summary, market_data, options_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     st.markdown(
-        '<div class="section-note">The overview tab stays high signal on purpose. Each deeper tab isolates a model so you can validate where the read is coming from instead of trusting a single blended number.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view}</strong>. The sidebar now controls which model is computed so deeper analytics are fetched only when you select them.</div>',
         unsafe_allow_html=True,
     )
 
-    tabs = st.tabs(["Overview", "Elder Impulse", "TD Sequential", "Robust STL", "SMC", "Market Pulse", "Options Flow"])
-
-    with tabs[0]:
+    if active_view == "Overview":
         overview_cols = st.columns([1.75, 1.05])
         with overview_cols[0]:
             st.plotly_chart(compute_overview_figure(price_df), use_container_width=True)
@@ -1639,21 +1699,17 @@ def main() -> None:
                     "Return %": st.column_config.NumberColumn(format="%.2f"),
                 },
             )
-
-    with tabs[1]:
+    elif active_view == "Elder Impulse":
         st.plotly_chart(build_elder_figure(elder_df), use_container_width=True)
-
-    with tabs[2]:
+    elif active_view == "TD Sequential":
         st.plotly_chart(build_td_figure(td_df), use_container_width=True)
-
-    with tabs[3]:
+    elif active_view == "Robust STL":
         if stl_df is None or stl_df.dropna(subset=["Trend", "Cycle_Score"]).empty:
             st.info("Robust STL could not build a valid cycle series for this ticker after trying both FinanceDataReader and Yahoo Finance.")
         else:
             st.caption(f"STL source: {stl_source} via `{stl_symbol}`")
             st.plotly_chart(build_stl_figure(stl_df), use_container_width=True)
-
-    with tabs[4]:
+    elif active_view == "SMC":
         smc_cols = st.columns([1.65, 0.95])
         with smc_cols[0]:
             st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
@@ -1670,11 +1726,9 @@ def main() -> None:
                         "Distance %": st.column_config.NumberColumn(format="%.2f"),
                     },
                 )
-
-    with tabs[5]:
+    elif active_view == "Market Pulse":
         st.plotly_chart(build_market_figure(market_data), use_container_width=True)
-
-    with tabs[6]:
+    elif active_view == "Options Flow":
         if not options_data:
             st.info("SPX option data could not be loaded from the CBOE delayed quotes feed.")
         else:
@@ -1694,3 +1748,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
