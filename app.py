@@ -25,7 +25,8 @@ PLOT_FONT = {
 }
 GRID_COLOR = "rgba(71, 85, 105, 0.18)"
 KOREAN_SUFFIX_PATTERN = re.compile(r"^(?P<code>\d{6})\.(KS|KQ)$", re.IGNORECASE)
-DASHBOARD_VIEWS = ["Elder Impulse", "TD Sequential", "Robust STL", "SMC", "Market Pulse", "Options Flow"]
+CORE_DASHBOARD_VIEWS = ["Elder Impulse", "TD Sequential", "Robust STL", "SMC", "SuperTrend", "Williams Vix Fix", "Squeeze Momentum"]
+SPECIAL_ACTION_VIEWS = ["Market Pulse", "Options Flow"]
 
 
 @dataclass
@@ -342,6 +343,15 @@ def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi.fillna(50)
 
 
+def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    prev_close = df["Close"].shift(1)
+    true_range = np.maximum(
+        df["High"] - df["Low"],
+        np.maximum((df["High"] - prev_close).abs(), (df["Low"] - prev_close).abs()),
+    )
+    return true_range.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+
 def pct_change_from_index(series: pd.Series, periods: int) -> float:
     if len(series) <= periods:
         return np.nan
@@ -373,9 +383,9 @@ def apply_figure_style(
     xaxis_rangeslider_visible: bool = False,
 ) -> go.Figure:
     fig.update_layout(
-        title=title,
+        title=dict(text=title, x=0.02, y=0.97, xanchor="left", yanchor="top"),
         height=height,
-        margin=dict(l=22, r=22, t=58, b=18),
+        margin=dict(l=22, r=22, t=92, b=18),
         paper_bgcolor="rgba(255,255,255,0.0)",
         plot_bgcolor="rgba(255,255,255,0.0)",
         font=PLOT_FONT,
@@ -865,8 +875,7 @@ def filter_active_zones(zones: list[dict[str, Any]], df: pd.DataFrame, limit: in
 
 def compute_smc(df: pd.DataFrame) -> dict[str, Any]:
     work = df.copy()
-    work["TR"] = np.maximum(work["High"] - work["Low"], np.maximum((work["High"] - work["Close"].shift(1)).abs(), (work["Low"] - work["Close"].shift(1)).abs()))
-    work["ATR"] = work["TR"].rolling(14).mean()
+    work["ATR"] = calc_atr(work, period=14)
     work["VOL_MA"] = work["Volume"].rolling(20).mean()
     work["EMA21"] = work["Close"].ewm(span=21, adjust=False).mean()
     work["SMA200"] = work["Close"].rolling(200).mean()
@@ -899,19 +908,12 @@ def compute_smc(df: pd.DataFrame) -> dict[str, Any]:
             range_low = min(item["price"] for item in recent_swings)
             eq_price = (range_high + range_low) / 2
 
-    current_price = float(view["Close"].iloc[-1])
-    zones_table = []
-    for item in active_bull_ob + active_bear_ob + active_bull_fvg + active_bear_fvg:
-        midpoint = (item["top"] + item["bottom"]) / 2
-        zones_table.append({"Zone": item["label"], "Bias": item["type"].upper(), "Range": f"{item['bottom']:.2f} - {item['top']:.2f}", "Distance %": round((current_price / midpoint - 1) * 100, 2)})
-
     return {
         "view": view,
         "poc_price": poc_price,
         "eq_price": eq_price,
         "future_end": view.index[-1] + timedelta(days=35),
         "levels": sorted(swings, key=lambda item: item["date"], reverse=True)[:4],
-        "zones_table": pd.DataFrame(zones_table),
         "active_bull_ob": active_bull_ob,
         "active_bear_ob": active_bear_ob,
         "active_bull_fvg": active_bull_fvg,
@@ -1072,7 +1074,216 @@ def build_smc_figure(smc_data: dict[str, Any]) -> go.Figure:
         )
 
     fig.update_xaxes(range=[x0, x1], row=1, col=1)
-    return apply_figure_style(fig, title="Smart Money Concepts", height=990)
+    return apply_figure_style(fig, title="Smart Money Concepts", height=860)
+
+
+def compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    work = df.copy()
+    work["ATR"] = calc_atr(work, period=period)
+    hl2 = (work["High"] + work["Low"]) / 2
+    basic_upper = hl2 + (multiplier * work["ATR"])
+    basic_lower = hl2 - (multiplier * work["ATR"])
+
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    supertrend = pd.Series(np.nan, index=work.index, dtype=float)
+    direction = pd.Series(1, index=work.index, dtype=int)
+
+    for i in range(1, len(work)):
+        if pd.isna(work["ATR"].iat[i]):
+            continue
+
+        prev_close = work["Close"].iat[i - 1]
+        if pd.isna(final_upper.iat[i - 1]):
+            final_upper.iat[i] = basic_upper.iat[i]
+        elif basic_upper.iat[i] < final_upper.iat[i - 1] or prev_close > final_upper.iat[i - 1]:
+            final_upper.iat[i] = basic_upper.iat[i]
+        else:
+            final_upper.iat[i] = final_upper.iat[i - 1]
+
+        if pd.isna(final_lower.iat[i - 1]):
+            final_lower.iat[i] = basic_lower.iat[i]
+        elif basic_lower.iat[i] > final_lower.iat[i - 1] or prev_close < final_lower.iat[i - 1]:
+            final_lower.iat[i] = basic_lower.iat[i]
+        else:
+            final_lower.iat[i] = final_lower.iat[i - 1]
+
+        if i == 1 or pd.isna(supertrend.iat[i - 1]):
+            direction.iat[i] = 1 if work["Close"].iat[i] >= hl2.iat[i] else -1
+        elif supertrend.iat[i - 1] == final_upper.iat[i - 1]:
+            direction.iat[i] = 1 if work["Close"].iat[i] > final_upper.iat[i] else -1
+        else:
+            direction.iat[i] = -1 if work["Close"].iat[i] < final_lower.iat[i] else 1
+
+        supertrend.iat[i] = final_lower.iat[i] if direction.iat[i] == 1 else final_upper.iat[i]
+
+    work["SuperTrend"] = supertrend
+    work["Direction"] = direction
+    work["LongFlip"] = (work["Direction"] == 1) & (work["Direction"].shift(1) == -1)
+    work["ShortFlip"] = (work["Direction"] == -1) & (work["Direction"].shift(1) == 1)
+    return work.tail(220).copy()
+
+
+def supertrend_signal_label(supertrend_df: pd.DataFrame | None) -> tuple[str, str]:
+    if supertrend_df is None or supertrend_df.empty:
+        return "Not loaded", "neutral"
+    latest = int(supertrend_df["Direction"].iloc[-1])
+    if latest > 0:
+        return "Trend support active", "bull"
+    return "Trend resistance active", "bear"
+
+
+def build_supertrend_figure(supertrend_df: pd.DataFrame) -> go.Figure:
+    view = supertrend_df.copy()
+    bull_mask = view["Direction"] > 0
+    bear_mask = view["Direction"] < 0
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.76, 0.24], vertical_spacing=0.05)
+    fig.add_trace(
+        go.Candlestick(
+            x=view.index,
+            open=view["Open"],
+            high=view["High"],
+            low=view["Low"],
+            close=view["Close"],
+            increasing_line_color="#0f766e",
+            decreasing_line_color="#b42318",
+            name="Price",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=view.index, y=view["SuperTrend"].where(bull_mask), mode="lines", name="Bull ST", line=dict(color="#0f766e", width=2.6)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["SuperTrend"].where(bear_mask), mode="lines", name="Bear ST", line=dict(color="#b42318", width=2.6)), row=1, col=1)
+    long_flips = view[view["LongFlip"]]
+    short_flips = view[view["ShortFlip"]]
+    if not long_flips.empty:
+        fig.add_trace(go.Scatter(x=long_flips.index, y=long_flips["Low"] * 0.995, mode="markers", name="Long flip", marker=dict(color="#0f766e", symbol="triangle-up", size=12)), row=1, col=1)
+    if not short_flips.empty:
+        fig.add_trace(go.Scatter(x=short_flips.index, y=short_flips["High"] * 1.005, mode="markers", name="Short flip", marker=dict(color="#b42318", symbol="triangle-down", size=12)), row=1, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["ATR"], name="ATR", marker_color="#64748b"), row=2, col=1)
+    return apply_figure_style(fig, title="SuperTrend Regime", height=820)
+
+
+def compute_williams_vix_fix(
+    df: pd.DataFrame,
+    pd_window: int = 22,
+    bbl: int = 20,
+    mult: float = 2.0,
+    lb: int = 50,
+    ph: float = 0.85,
+) -> pd.DataFrame:
+    work = df.copy()
+    highest_close = work["Close"].rolling(pd_window).max()
+    lowest_close = work["Close"].rolling(pd_window).min()
+    work["WVF"] = ((highest_close - work["Low"]) / highest_close.replace(0, np.nan)) * 100
+    work["WVF_Mid"] = work["WVF"].rolling(bbl).mean()
+    work["WVF_Upper"] = work["WVF_Mid"] + (mult * work["WVF"].rolling(bbl).std())
+    work["WVF_RangeHigh"] = work["WVF"].rolling(lb).max() * ph
+    work["Oversold"] = (work["WVF"] >= work["WVF_Upper"]) | (work["WVF"] >= work["WVF_RangeHigh"])
+    work["OversoldExit"] = (work["Oversold"].shift(1).rolling(4).sum() == 4) & (~work["Oversold"])
+
+    work["WVF_Inverse"] = ((work["High"] - lowest_close) / lowest_close.replace(0, np.nan)) * 100
+    work["WVF_Inv_Mid"] = work["WVF_Inverse"].rolling(bbl).mean()
+    work["WVF_Inv_Upper"] = work["WVF_Inv_Mid"] + (mult * work["WVF_Inverse"].rolling(bbl).std())
+    work["WVF_Inv_RangeHigh"] = work["WVF_Inverse"].rolling(lb).max() * ph
+    work["Overbought"] = (work["WVF_Inverse"] >= work["WVF_Inv_Upper"]) | (work["WVF_Inverse"] >= work["WVF_Inv_RangeHigh"])
+    work["OverboughtExit"] = (work["Overbought"].shift(1).rolling(4).sum() == 4) & (~work["Overbought"])
+    return work.tail(220).copy()
+
+
+def vix_fix_signal_label(vix_fix_df: pd.DataFrame | None) -> tuple[str, str]:
+    if vix_fix_df is None or vix_fix_df.empty:
+        return "Not loaded", "neutral"
+    if bool(vix_fix_df["Oversold"].iloc[-1]):
+        return "Panic spike / oversold", "bull"
+    if bool(vix_fix_df["Overbought"].iloc[-1]):
+        return "Complacency spike / overbought", "bear"
+    return "Inside normal volatility range", "neutral"
+
+
+def build_vix_fix_figure(vix_fix_df: pd.DataFrame) -> go.Figure:
+    view = vix_fix_df.copy()
+    colors = np.where(view["Oversold"], "#0f766e", np.where(view["OversoldExit"], "#b42318", "#94a3b8"))
+    inverse_colors = np.where(view["Overbought"], "#b42318", np.where(view["OverboughtExit"], "#0f766e", "#cbd5e1"))
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.42, 0.29, 0.29],
+        vertical_spacing=0.05,
+        subplot_titles=("Price", "Williams Vix Fix", "Inverse Williams Vix Fix"),
+    )
+    fig.add_trace(go.Candlestick(x=view.index, open=view["Open"], high=view["High"], low=view["Low"], close=view["Close"], increasing_line_color="#0f766e", decreasing_line_color="#b42318", name="Price"), row=1, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["WVF"], name="WVF", marker_color=colors), row=2, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["WVF_Upper"], name="WVF band", line=dict(color="#111827", width=1.6, dash="dot")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["WVF_RangeHigh"], name="Range high", line=dict(color="#dd6b20", width=1.4)), row=2, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["WVF_Inverse"], name="Inverse", marker_color=inverse_colors), row=3, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["WVF_Inv_Upper"], name="Inverse band", line=dict(color="#334155", width=1.6, dash="dot")), row=3, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["WVF_Inv_RangeHigh"], name="Inverse range high", line=dict(color="#7c3aed", width=1.4)), row=3, col=1)
+
+    oversold_exit = view[view["OversoldExit"]]
+    overbought_exit = view[view["OverboughtExit"]]
+    if not oversold_exit.empty:
+        fig.add_trace(go.Scatter(x=oversold_exit.index, y=oversold_exit["Low"] * 0.99, mode="markers", name="Oversold exit", marker=dict(color="#0f766e", symbol="diamond", size=10)), row=1, col=1)
+    if not overbought_exit.empty:
+        fig.add_trace(go.Scatter(x=overbought_exit.index, y=overbought_exit["High"] * 1.01, mode="markers", name="Overbought exit", marker=dict(color="#b42318", symbol="diamond", size=10)), row=1, col=1)
+    return apply_figure_style(fig, title="Williams Vix Fix / Inverse", height=920)
+
+
+def compute_squeeze_momentum(
+    df: pd.DataFrame,
+    bb_length: int = 20,
+    kc_length: int = 20,
+    bb_mult: float = 1.5,
+    kc_mult: float = 1.5,
+) -> pd.DataFrame:
+    work = df.copy()
+    work["Basis"] = work["Close"].rolling(bb_length).mean()
+    dev = work["Close"].rolling(bb_length).std() * bb_mult
+    work["UpperBB"] = work["Basis"] + dev
+    work["LowerBB"] = work["Basis"] - dev
+
+    work["KC_Mid"] = work["Close"].rolling(kc_length).mean()
+    work["RangeMA"] = (work["High"] - work["Low"]).rolling(kc_length).mean()
+    work["UpperKC"] = work["KC_Mid"] + (work["RangeMA"] * kc_mult)
+    work["LowerKC"] = work["KC_Mid"] - (work["RangeMA"] * kc_mult)
+
+    high_roll = work["High"].rolling(kc_length).max()
+    low_roll = work["Low"].rolling(kc_length).min()
+    work["Momentum"] = (work["Close"] - (((high_roll + low_roll) / 2) + work["KC_Mid"]) / 2).rolling(5).mean()
+    work["SqueezeOn"] = (work["LowerBB"] > work["LowerKC"]) & (work["UpperBB"] < work["UpperKC"])
+    work["SqueezeOff"] = (work["LowerBB"] < work["LowerKC"]) & (work["UpperBB"] > work["UpperKC"])
+    return work.tail(220).copy()
+
+
+def squeeze_signal_label(squeeze_df: pd.DataFrame | None) -> tuple[str, str]:
+    if squeeze_df is None or squeeze_df.empty:
+        return "Not loaded", "neutral"
+    momentum = float(squeeze_df["Momentum"].iloc[-1])
+    in_squeeze = bool(squeeze_df["SqueezeOn"].iloc[-1])
+    if in_squeeze and momentum >= 0:
+        return "Compression with positive bias", "accent"
+    if in_squeeze and momentum < 0:
+        return "Compression with negative bias", "bear"
+    if momentum >= 0:
+        return "Expansion to upside", "bull"
+    return "Expansion to downside", "bear"
+
+
+def build_squeeze_figure(squeeze_df: pd.DataFrame) -> go.Figure:
+    view = squeeze_df.copy()
+    hist_colors = np.where(view["Momentum"] >= 0, "#0f766e", "#b42318")
+    squeeze_markers = np.where(view["SqueezeOn"], "#111827", np.where(view["SqueezeOff"], "#f59e0b", "#cbd5e1"))
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.62, 0.38], vertical_spacing=0.05)
+    fig.add_trace(go.Candlestick(x=view.index, open=view["Open"], high=view["High"], low=view["Low"], close=view["Close"], increasing_line_color="#0f766e", decreasing_line_color="#b42318", name="Price"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["UpperBB"], name="Upper BB", line=dict(color="#b42318", width=1.4)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["LowerBB"], name="Lower BB", line=dict(color="#b42318", width=1.4)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["UpperKC"], name="Upper KC", line=dict(color="#0f766e", width=1.4, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["LowerKC"], name="Lower KC", line=dict(color="#0f766e", width=1.4, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["Momentum"], name="Momentum", marker_color=hist_colors), row=2, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=np.zeros(len(view)), mode="markers", name="Squeeze state", marker=dict(color=squeeze_markers, size=8)), row=2, col=1)
+    fig.add_hline(y=0, line_color="#64748b", line_width=1, line_dash="dot", row=2, col=1)
+    return apply_figure_style(fig, title="Squeeze Momentum", height=840)
 
 
 def get_probability(series: pd.Series, window: int, inverse: bool = False) -> pd.Series:
@@ -1496,13 +1707,24 @@ def format_pct(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.2f}%"
 
 
-def render_header(summary: DashboardSummary, active_view: str, market_data: dict[str, Any] | None, options_data: dict[str, Any] | None) -> None:
+def render_header(
+    summary: DashboardSummary,
+    active_view: str,
+    market_data: dict[str, Any] | None,
+    options_data: dict[str, Any] | None,
+    supertrend_data: pd.DataFrame | None,
+    vix_fix_data: pd.DataFrame | None,
+    squeeze_data: pd.DataFrame | None,
+) -> None:
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     view_status_map = {
         "Elder Impulse": (summary.elder_label, "Momentum and trend filter status."),
         "TD Sequential": (summary.td_label, "Setup and countdown exhaustion context."),
         "Robust STL": (summary.stl_label, "Cycle stretch versus smoothed trend."),
         "SMC": ("Loaded", "Smart money zones and active structures."),
+        "SuperTrend": (supertrend_signal_label(supertrend_data)[0], "ATR band flips and live regime line."),
+        "Williams Vix Fix": (vix_fix_signal_label(vix_fix_data)[0], "Panic/complacency spikes versus recent extremes."),
+        "Squeeze Momentum": (squeeze_signal_label(squeeze_data)[0], "Bollinger versus Keltner compression state."),
         "Market Pulse": (market_data["status"][0] if market_data else "Not loaded", "Cross-asset risk appetite backdrop."),
         "Options Flow": (options_signal_label(options_data)[0], f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"),
     }
@@ -1514,6 +1736,12 @@ def render_header(summary: DashboardSummary, active_view: str, market_data: dict
         active_tone = "bull" if "Buy" in summary.td_label else "bear" if "Sell" in summary.td_label else "neutral"
     elif active_view == "Robust STL":
         active_tone = "bull" if "Bull" in summary.stl_label else "bear" if "Bear" in summary.stl_label else "neutral"
+    elif active_view == "SuperTrend":
+        active_tone = supertrend_signal_label(supertrend_data)[1]
+    elif active_view == "Williams Vix Fix":
+        active_tone = vix_fix_signal_label(vix_fix_data)[1]
+    elif active_view == "Squeeze Momentum":
+        active_tone = squeeze_signal_label(squeeze_data)[1]
     elif active_view == "Market Pulse" and market_data:
         active_tone = market_data["status"][1]
     elif active_view == "Options Flow":
@@ -1558,13 +1786,17 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         index=period_options.index(default_period) if default_period in period_options else period_options.index("3y"),
         key="period_select",
     )
-    default_view = st.session_state.get("dashboard_view", DASHBOARD_VIEWS[0])
-    active_view = st.sidebar.selectbox(
-        "View",
-        options=DASHBOARD_VIEWS,
-        index=DASHBOARD_VIEWS.index(default_view) if default_view in DASHBOARD_VIEWS else 0,
+    last_core_view = st.session_state.get("last_core_view", CORE_DASHBOARD_VIEWS[0])
+    core_view = st.sidebar.selectbox(
+        "Chart View",
+        options=CORE_DASHBOARD_VIEWS,
+        index=CORE_DASHBOARD_VIEWS.index(last_core_view) if last_core_view in CORE_DASHBOARD_VIEWS else 0,
         key="dashboard_view_select",
     )
+    st.sidebar.caption("Macro / options quick actions")
+    pulse_col, options_col = st.sidebar.columns(2)
+    market_clicked = pulse_col.button(SPECIAL_ACTION_VIEWS[0], use_container_width=True)
+    options_clicked = options_col.button(SPECIAL_ACTION_VIEWS[1], use_container_width=True)
     force_refresh = st.sidebar.checkbox("Force refresh cached data", value=False, key="force_refresh_toggle")
     if force_refresh:
         st.cache_data.clear()
@@ -1576,6 +1808,14 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
     active_period = period
     st.session_state["ticker"] = active_ticker
     st.session_state["period"] = active_period
+    active_view = st.session_state.get("dashboard_view", core_view)
+    if core_view != last_core_view:
+        active_view = core_view
+    if market_clicked:
+        active_view = SPECIAL_ACTION_VIEWS[0]
+    elif options_clicked:
+        active_view = SPECIAL_ACTION_VIEWS[1]
+    st.session_state["last_core_view"] = core_view
     st.session_state["dashboard_view"] = active_view
 
     selected_expiry = None
@@ -1664,6 +1904,9 @@ def main() -> None:
     need_td = active_view == "TD Sequential"
     need_stl = active_view == "Robust STL"
     need_smc = active_view == "SMC"
+    need_supertrend = active_view == "SuperTrend"
+    need_vix_fix = active_view == "Williams Vix Fix"
+    need_squeeze = active_view == "Squeeze Momentum"
     need_market = active_view == "Market Pulse"
     need_options = active_view == "Options Flow"
 
@@ -1677,14 +1920,17 @@ def main() -> None:
             stl_source_df, stl_source, stl_symbol = download_stl_data(ticker)
         stl_df = compute_stl_cycle(stl_source_df) if need_stl and not stl_source_df.empty else None
         smc_data = compute_smc(price_df) if need_smc else None
+        supertrend_data = compute_supertrend(price_df) if need_supertrend else None
+        vix_fix_data = compute_williams_vix_fix(price_df) if need_vix_fix else None
+        squeeze_data = compute_squeeze_momentum(price_df) if need_squeeze else None
         market_data = compute_market_fear_greed() if need_market else None
         options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
-    render_header(summary, active_view, market_data, options_data)
+    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     st.markdown(
-        f'<div class="section-note">Active view: <strong>{active_view}</strong>. Controls apply immediately when you change them.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view}</strong>. Core indicators are selected from the chart picker, while Market Pulse and Options Flow run from their own quick-action buttons.</div>',
         unsafe_allow_html=True,
     )
 
@@ -1696,25 +1942,16 @@ def main() -> None:
         if stl_df is None or stl_df.dropna(subset=["Trend", "Cycle_Score"]).empty:
             st.info("Robust STL could not build a valid cycle series for this ticker after trying both FinanceDataReader and Yahoo Finance.")
         else:
-            st.caption(f"STL source: {stl_source} via `{stl_symbol}`")
             st.plotly_chart(build_stl_figure(stl_df), use_container_width=True)
+            st.caption(f"STL source: {stl_source} via `{stl_symbol}`")
     elif active_view == "SMC":
-        smc_cols = st.columns([1.65, 0.95])
-        with smc_cols[0]:
-            st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
-        with smc_cols[1]:
-            st.subheader("Active zones")
-            if smc_data["zones_table"].empty:
-                st.info("No active order block or fair value gap survived the current filter.")
-            else:
-                st.dataframe(
-                    smc_data["zones_table"],
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Distance %": st.column_config.NumberColumn(format="%.2f"),
-                    },
-                )
+        st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
+    elif active_view == "SuperTrend":
+        st.plotly_chart(build_supertrend_figure(supertrend_data), use_container_width=True)
+    elif active_view == "Williams Vix Fix":
+        st.plotly_chart(build_vix_fix_figure(vix_fix_data), use_container_width=True)
+    elif active_view == "Squeeze Momentum":
+        st.plotly_chart(build_squeeze_figure(squeeze_data), use_container_width=True)
     elif active_view == "Market Pulse":
         st.plotly_chart(build_market_figure(market_data), use_container_width=True)
     elif active_view == "Options Flow":
