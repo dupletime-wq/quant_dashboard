@@ -1787,7 +1787,7 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         key="period_select",
     )
     last_core_view = st.session_state.get("last_core_view", CORE_DASHBOARD_VIEWS[0])
-    core_view = st.sidebar.selectbox(
+    core_view = st.sidebar.radio(
         "Chart View",
         options=CORE_DASHBOARD_VIEWS,
         index=CORE_DASHBOARD_VIEWS.index(last_core_view) if last_core_view in CORE_DASHBOARD_VIEWS else 0,
