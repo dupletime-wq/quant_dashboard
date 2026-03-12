@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import pickle
+from pathlib import Path
 import re
 from typing import Any
 
@@ -27,6 +29,7 @@ GRID_COLOR = "rgba(71, 85, 105, 0.18)"
 KOREAN_SUFFIX_PATTERN = re.compile(r"^(?P<code>\d{6})\.(KS|KQ)$", re.IGNORECASE)
 CORE_DASHBOARD_VIEWS = ["Elder Impulse", "TD Sequential", "Robust STL", "SMC", "SuperTrend", "Williams Vix Fix", "Squeeze Momentum"]
 SPECIAL_ACTION_VIEWS = ["Market Pulse", "Options Flow"]
+CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 
 
 @dataclass
@@ -255,6 +258,50 @@ def dedupe_preserve_order(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _daily_cache_path(name: str) -> Path:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return CACHE_DIR / f"{name}.pkl"
+
+
+def load_daily_cached_payload(name: str) -> tuple[str | None, Any]:
+    cache_path = _daily_cache_path(name)
+    if not cache_path.exists():
+        return None, None
+    try:
+        with cache_path.open("rb") as cache_file:
+            payload = pickle.load(cache_file)
+        return payload.get("cache_date"), payload.get("data")
+    except Exception:
+        return None, None
+
+
+def save_daily_cached_payload(name: str, data: Any) -> None:
+    cache_path = _daily_cache_path(name)
+    with cache_path.open("wb") as cache_file:
+        pickle.dump({"cache_date": datetime.now().strftime("%Y-%m-%d"), "data": data}, cache_file)
+
+
+def get_or_refresh_daily_payload(name: str, fetcher: Any) -> Any:
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_date, cached_data = load_daily_cached_payload(name)
+    if cache_date == today and cached_data is not None:
+        return cached_data
+
+    fresh_data = fetcher()
+    if fresh_data is not None:
+        save_daily_cached_payload(name, fresh_data)
+        return fresh_data
+    return cached_data
+
+
+def clear_daily_payload_cache(*names: str) -> None:
+    target_names = names or ("market_pulse", "spx_options_payload")
+    for name in target_names:
+        cache_path = _daily_cache_path(name)
+        if cache_path.exists():
+            cache_path.unlink()
 
 
 def get_yfinance_candidates(ticker: str) -> list[str]:
@@ -1294,12 +1341,14 @@ def get_probability(series: pd.Series, window: int, inverse: bool = False) -> pd
     return 1 - prob if inverse else prob
 
 
-@st.cache_data(ttl=7200, show_spinner=False)
-def compute_market_fear_greed() -> dict[str, Any]:
+def _fetch_market_fear_greed() -> dict[str, Any] | None:
     tickers = ["SPY", "^VIX", "HYG", "IEF", "RSP", "XLY", "XLP", "UUP"]
-    raw = yf.download(tickers, period="6y", progress=False, auto_adjust=False, threads=False)
-    close_df = raw["Close"].copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
-    close_df = close_df.ffill().dropna()
+    try:
+        raw = yf.download(tickers, period="6y", progress=False, auto_adjust=False, threads=False)
+        close_df = raw["Close"].copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
+        close_df = close_df.ffill().dropna()
+    except Exception:
+        return None
 
     factors = pd.DataFrame(index=close_df.index)
     ma20 = close_df["SPY"].rolling(20).mean()
@@ -1344,6 +1393,10 @@ def compute_market_fear_greed() -> dict[str, Any]:
         "plot_df": plot_df.tail(260),
         "status": classify_market_score(latest_score),
     }
+
+
+def compute_market_fear_greed() -> dict[str, Any] | None:
+    return get_or_refresh_daily_payload("market_pulse", _fetch_market_fear_greed)
 
 
 def build_market_figure(market_data: dict[str, Any]) -> go.Figure:
@@ -1414,8 +1467,7 @@ def get_risk_free_rate() -> float:
         return 0.04
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_spx_options_payload() -> dict[str, Any] | None:
+def _fetch_spx_options_payload() -> dict[str, Any] | None:
     try:
         response = requests.get(
             "https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json",
@@ -1429,6 +1481,10 @@ def fetch_spx_options_payload() -> dict[str, Any] | None:
         return payload
     except Exception:
         return None
+
+
+def fetch_spx_options_payload() -> dict[str, Any] | None:
+    return get_or_refresh_daily_payload("spx_options_payload", _fetch_spx_options_payload)
 
 
 def extract_spx_expiries(payload: dict[str, Any] | None) -> list[str]:
@@ -1800,6 +1856,7 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
     force_refresh = st.sidebar.checkbox("Force refresh cached data", value=False, key="force_refresh_toggle")
     if force_refresh:
         st.cache_data.clear()
+        clear_daily_payload_cache()
         st.session_state["force_refresh_toggle"] = False
     st.sidebar.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, 035420.KQ, BTC-USD")
     st.sidebar.caption("Korean equities accept both Yahoo suffixes and plain 6-digit codes.")
