@@ -355,6 +355,16 @@ def download_price_data(ticker: str, period: str = "3y") -> tuple[pd.DataFrame, 
         if not frame.empty:
             return frame, "Yahoo Finance", candidate
 
+    for candidate in get_fdr_candidates(ticker):
+        try:
+            df = fdr.DataReader(candidate, "2020-01-01")
+        except Exception:
+            continue
+
+        frame = normalize_ohlcv_frame(df)
+        if not frame.empty:
+            return frame, "FinanceDataReader", candidate
+
     return pd.DataFrame(), "Yahoo Finance", ticker.strip().upper()
 
 
@@ -2283,4 +2293,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
