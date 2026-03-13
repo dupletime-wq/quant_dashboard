@@ -27,7 +27,18 @@ PLOT_FONT = {
 }
 GRID_COLOR = "rgba(71, 85, 105, 0.18)"
 KOREAN_SUFFIX_PATTERN = re.compile(r"^(?P<code>\d{6})\.(KS|KQ)$", re.IGNORECASE)
-CORE_DASHBOARD_VIEWS = ["Elder Impulse", "TD Sequential", "Robust STL", "SMC", "SuperTrend", "Williams Vix Fix", "Squeeze Momentum"]
+CORE_DASHBOARD_VIEWS = [
+    "Elder Impulse",
+    "TD Sequential",
+    "Robust STL",
+    "SMC",
+    "SuperTrend",
+    "Williams Vix Fix",
+    "Squeeze Momentum",
+    "Nadaraya-Watson",
+    "Lorentzian Classification",
+    "CVD Divergence",
+]
 SPECIAL_ACTION_VIEWS = ["Market Pulse", "Options Flow"]
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 
@@ -1333,6 +1344,223 @@ def build_squeeze_figure(squeeze_df: pd.DataFrame) -> go.Figure:
     return apply_figure_style(fig, title="Squeeze Momentum", height=840)
 
 
+def compute_nadaraya_watson(df: pd.DataFrame, window: int = 80, bandwidth: float = 12.0) -> pd.DataFrame:
+    work = df.copy()
+    closes = work["Close"].to_numpy(dtype=float)
+    estimate = np.full(len(work), np.nan)
+    for i in range(len(work)):
+        start = max(0, i - window + 1)
+        idx = np.arange(start, i + 1)
+        distances = (idx - i) / bandwidth
+        weights = np.exp(-0.5 * distances**2)
+        estimate[i] = np.dot(weights, closes[start : i + 1]) / weights.sum()
+
+    work["NW_Estimate"] = estimate
+    residual = work["Close"] - work["NW_Estimate"]
+    band = residual.rolling(20).std().fillna(0) * 1.5
+    work["NW_Upper"] = work["NW_Estimate"] + band
+    work["NW_Lower"] = work["NW_Estimate"] - band
+    work["NW_Slope"] = pd.Series(estimate, index=work.index).diff()
+    work["NW_Trend"] = np.where(work["NW_Slope"] > 0, 1, np.where(work["NW_Slope"] < 0, -1, 0))
+    return work.tail(240).copy()
+
+
+def nadaraya_signal_label(nw_df: pd.DataFrame | None) -> tuple[str, str]:
+    if nw_df is None or nw_df.empty:
+        return "Not loaded", "neutral"
+    latest = int(nw_df["NW_Trend"].iloc[-1])
+    if latest > 0:
+        return "Kernel trend rising", "bull"
+    if latest < 0:
+        return "Kernel trend falling", "bear"
+    return "Kernel trend flat", "neutral"
+
+
+def build_nadaraya_figure(nw_df: pd.DataFrame) -> go.Figure:
+    view = nw_df.copy()
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.78, 0.22], vertical_spacing=0.05)
+    fig.add_trace(
+        go.Candlestick(
+            x=view.index,
+            open=view["Open"],
+            high=view["High"],
+            low=view["Low"],
+            close=view["Close"],
+            increasing_line_color="#0f766e",
+            decreasing_line_color="#b42318",
+            name="Price",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=view.index, y=view["NW_Estimate"], name="NW estimate", line=dict(color="#111827", width=2.2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["NW_Upper"], name="Upper band", line=dict(color="#2563eb", width=1.4, dash="dot")), row=1, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=view.index,
+            y=view["NW_Lower"],
+            name="Lower band",
+            line=dict(color="#2563eb", width=1.4, dash="dot"),
+            fill="tonexty",
+            fillcolor="rgba(37,99,235,0.08)",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Bar(x=view.index, y=view["NW_Slope"], name="Slope", marker_color=np.where(view["NW_Slope"] >= 0, "#0f766e", "#b42318")), row=2, col=1)
+    fig.add_hline(y=0, line_color="#64748b", line_width=1, line_dash="dot", row=2, col=1)
+    return apply_figure_style(fig, title="Nadaraya-Watson Estimator", height=840)
+
+
+def compute_lorentzian_classification(df: pd.DataFrame, lookback: int = 180, neighbors: int = 8, horizon: int = 4) -> pd.DataFrame:
+    work = df.copy()
+    work["RSI"] = calc_rsi(work["Close"])
+    work["Ret5"] = work["Close"].pct_change(5).mul(100)
+    work["Dist20"] = ((work["Close"] / work["Close"].rolling(20).mean()) - 1).mul(100)
+    work["ATR_Norm"] = (calc_atr(work, 14) / work["Close"]).mul(100)
+    feature_cols = ["RSI", "Ret5", "Dist20", "ATR_Norm"]
+    features = work[feature_cols].fillna(0).to_numpy(dtype=float)
+    future_label = np.sign(work["Close"].shift(-horizon) - work["Close"]).to_numpy(dtype=float)
+
+    score = np.full(len(work), np.nan)
+    confidence = np.full(len(work), np.nan)
+    regime = np.zeros(len(work), dtype=int)
+
+    for i in range(max(lookback, 30), len(work) - horizon):
+        start = max(20, i - lookback)
+        distances: list[tuple[float, float]] = []
+        for j in range(start, i):
+            if np.isnan(future_label[j]) or future_label[j] == 0:
+                continue
+            dist = float(np.log1p(np.abs(features[i] - features[j])).sum())
+            distances.append((dist, future_label[j]))
+        if not distances:
+            continue
+        nearest = sorted(distances, key=lambda item: item[0])[:neighbors]
+        raw_score = sum(item[1] for item in nearest)
+        score[i] = raw_score
+        confidence[i] = abs(raw_score) / neighbors
+        regime[i] = 1 if raw_score > 0 else -1 if raw_score < 0 else 0
+
+    work["LC_Score"] = score
+    work["LC_Confidence"] = confidence
+    work["LC_Regime"] = regime
+    work["LC_LongFlip"] = (work["LC_Regime"] == 1) & (work["LC_Regime"].shift(1) <= 0)
+    work["LC_ShortFlip"] = (work["LC_Regime"] == -1) & (work["LC_Regime"].shift(1) >= 0)
+    return work.tail(240).copy()
+
+
+def lorentzian_signal_label(lc_df: pd.DataFrame | None) -> tuple[str, str]:
+    if lc_df is None or lc_df.empty:
+        return "Not loaded", "neutral"
+    latest = int(lc_df["LC_Regime"].iloc[-1])
+    confidence = float(lc_df["LC_Confidence"].fillna(0).iloc[-1])
+    if latest > 0:
+        return f"Bullish class ({confidence:.0%})", "bull"
+    if latest < 0:
+        return f"Bearish class ({confidence:.0%})", "bear"
+    return "Classification neutral", "neutral"
+
+
+def build_lorentzian_figure(lc_df: pd.DataFrame) -> go.Figure:
+    view = lc_df.copy()
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.05)
+    fig.add_trace(
+        go.Candlestick(
+            x=view.index,
+            open=view["Open"],
+            high=view["High"],
+            low=view["Low"],
+            close=view["Close"],
+            increasing_line_color="#0f766e",
+            decreasing_line_color="#b42318",
+            name="Price",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=view.index, y=view["Close"].rolling(20).mean(), name="MA 20", line=dict(color="#111827", width=1.5)), row=1, col=1)
+    long_flips = view[view["LC_LongFlip"]]
+    short_flips = view[view["LC_ShortFlip"]]
+    if not long_flips.empty:
+        fig.add_trace(go.Scatter(x=long_flips.index, y=long_flips["Low"] * 0.995, mode="markers", name="Bull flip", marker=dict(color="#0f766e", size=11, symbol="triangle-up")), row=1, col=1)
+    if not short_flips.empty:
+        fig.add_trace(go.Scatter(x=short_flips.index, y=short_flips["High"] * 1.005, mode="markers", name="Bear flip", marker=dict(color="#b42318", size=11, symbol="triangle-down")), row=1, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["LC_Score"], name="Lorentzian score", marker_color=np.where(view["LC_Score"] >= 0, "#0f766e", "#b42318")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["LC_Confidence"], name="Confidence", line=dict(color="#2563eb", width=1.8)), row=2, col=1)
+    fig.add_hline(y=0, line_color="#64748b", line_width=1, line_dash="dot", row=2, col=1)
+    return apply_figure_style(fig, title="Lorentzian Classification", height=840)
+
+
+def compute_cvd_divergence(df: pd.DataFrame) -> dict[str, Any]:
+    work = df.copy()
+    candle_range = (work["High"] - work["Low"]).replace(0, np.nan)
+    body_pressure = ((work["Close"] - work["Open"]) / candle_range).clip(-1, 1).fillna(0)
+    work["Delta"] = work["Volume"] * body_pressure
+    work["CVD"] = work["Delta"].cumsum()
+    view = work.tail(240).copy()
+
+    price_high_idx = argrelextrema(view["High"].to_numpy(), np.greater_equal, order=5)[0]
+    price_low_idx = argrelextrema(view["Low"].to_numpy(), np.less_equal, order=5)[0]
+    divergence: dict[str, Any] = {"type": "neutral", "points": []}
+
+    if len(price_low_idx) >= 2:
+        p1, p2 = price_low_idx[-2], price_low_idx[-1]
+        if view["Low"].iat[p2] < view["Low"].iat[p1] and view["CVD"].iat[p2] > view["CVD"].iat[p1]:
+            divergence = {
+                "type": "bullish",
+                "points": [(view.index[p1], float(view["Low"].iat[p1]), float(view["CVD"].iat[p1])), (view.index[p2], float(view["Low"].iat[p2]), float(view["CVD"].iat[p2]))],
+            }
+    if divergence["type"] == "neutral" and len(price_high_idx) >= 2:
+        p1, p2 = price_high_idx[-2], price_high_idx[-1]
+        if view["High"].iat[p2] > view["High"].iat[p1] and view["CVD"].iat[p2] < view["CVD"].iat[p1]:
+            divergence = {
+                "type": "bearish",
+                "points": [(view.index[p1], float(view["High"].iat[p1]), float(view["CVD"].iat[p1])), (view.index[p2], float(view["High"].iat[p2]), float(view["CVD"].iat[p2]))],
+            }
+    return {"view": view, "divergence": divergence}
+
+
+def cvd_signal_label(cvd_data: dict[str, Any] | None) -> tuple[str, str]:
+    if cvd_data is None:
+        return "Not loaded", "neutral"
+    divergence_type = cvd_data["divergence"]["type"]
+    if divergence_type == "bullish":
+        return "Bullish CVD divergence", "bull"
+    if divergence_type == "bearish":
+        return "Bearish CVD divergence", "bear"
+    return "No active divergence", "neutral"
+
+
+def build_cvd_figure(cvd_data: dict[str, Any]) -> go.Figure:
+    view = cvd_data["view"]
+    divergence = cvd_data["divergence"]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.62, 0.38], vertical_spacing=0.05)
+    fig.add_trace(
+        go.Candlestick(
+            x=view.index,
+            open=view["Open"],
+            high=view["High"],
+            low=view["Low"],
+            close=view["Close"],
+            increasing_line_color="#0f766e",
+            decreasing_line_color="#b42318",
+            name="Price",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Bar(x=view.index, y=view["Delta"], name="Delta", marker_color=np.where(view["Delta"] >= 0, "#0f766e", "#b42318"), opacity=0.35), row=2, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["CVD"], name="CVD", line=dict(color="#111827", width=2.0)), row=2, col=1)
+    if divergence["type"] != "neutral":
+        p1, p2 = divergence["points"]
+        price_color = "#0f766e" if divergence["type"] == "bullish" else "#b42318"
+        fig.add_trace(go.Scatter(x=[p1[0], p2[0]], y=[p1[1], p2[1]], mode="lines+markers", name="Price divergence", line=dict(color=price_color, width=2.0)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[p1[0], p2[0]], y=[p1[2], p2[2]], mode="lines+markers", name="CVD divergence", line=dict(color=price_color, width=2.0, dash="dot")), row=2, col=1)
+    fig.add_hline(y=0, line_color="#64748b", line_width=1, line_dash="dot", row=2, col=1)
+    return apply_figure_style(fig, title="Cumulative Volume Delta Divergence", height=840)
+
+
 def get_probability(series: pd.Series, window: int, inverse: bool = False) -> pd.Series:
     roll_mean = series.rolling(window=window).mean()
     roll_std = series.rolling(window=window).std()
@@ -1771,6 +1999,9 @@ def render_header(
     supertrend_data: pd.DataFrame | None,
     vix_fix_data: pd.DataFrame | None,
     squeeze_data: pd.DataFrame | None,
+    nadaraya_data: pd.DataFrame | None,
+    lorentzian_data: pd.DataFrame | None,
+    cvd_data: dict[str, Any] | None,
 ) -> None:
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     view_status_map = {
@@ -1781,6 +2012,9 @@ def render_header(
         "SuperTrend": (supertrend_signal_label(supertrend_data)[0], "ATR band flips and live regime line."),
         "Williams Vix Fix": (vix_fix_signal_label(vix_fix_data)[0], "Panic/complacency spikes versus recent extremes."),
         "Squeeze Momentum": (squeeze_signal_label(squeeze_data)[0], "Bollinger versus Keltner compression state."),
+        "Nadaraya-Watson": (nadaraya_signal_label(nadaraya_data)[0], "Kernel regression trend and adaptive envelope."),
+        "Lorentzian Classification": (lorentzian_signal_label(lorentzian_data)[0], "Nearest-neighbor style regime classification."),
+        "CVD Divergence": (cvd_signal_label(cvd_data)[0], "Price swing versus cumulative delta disagreement."),
         "Market Pulse": (market_data["status"][0] if market_data else "Not loaded", "Cross-asset risk appetite backdrop."),
         "Options Flow": (options_signal_label(options_data)[0], f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"),
     }
@@ -1798,6 +2032,12 @@ def render_header(
         active_tone = vix_fix_signal_label(vix_fix_data)[1]
     elif active_view == "Squeeze Momentum":
         active_tone = squeeze_signal_label(squeeze_data)[1]
+    elif active_view == "Nadaraya-Watson":
+        active_tone = nadaraya_signal_label(nadaraya_data)[1]
+    elif active_view == "Lorentzian Classification":
+        active_tone = lorentzian_signal_label(lorentzian_data)[1]
+    elif active_view == "CVD Divergence":
+        active_tone = cvd_signal_label(cvd_data)[1]
     elif active_view == "Market Pulse" and market_data:
         active_tone = market_data["status"][1]
     elif active_view == "Options Flow":
@@ -1964,6 +2204,9 @@ def main() -> None:
     need_supertrend = active_view == "SuperTrend"
     need_vix_fix = active_view == "Williams Vix Fix"
     need_squeeze = active_view == "Squeeze Momentum"
+    need_nadaraya = active_view == "Nadaraya-Watson"
+    need_lorentzian = active_view == "Lorentzian Classification"
+    need_cvd = active_view == "CVD Divergence"
     need_market = active_view == "Market Pulse"
     need_options = active_view == "Options Flow"
 
@@ -1980,11 +2223,14 @@ def main() -> None:
         supertrend_data = compute_supertrend(price_df) if need_supertrend else None
         vix_fix_data = compute_williams_vix_fix(price_df) if need_vix_fix else None
         squeeze_data = compute_squeeze_momentum(price_df) if need_squeeze else None
+        nadaraya_data = compute_nadaraya_watson(price_df) if need_nadaraya else None
+        lorentzian_data = compute_lorentzian_classification(price_df) if need_lorentzian else None
+        cvd_data = compute_cvd_divergence(price_df) if need_cvd else None
         market_data = compute_market_fear_greed() if need_market else None
         options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
-    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data)
+    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, nadaraya_data, lorentzian_data, cvd_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     st.markdown(
         f'<div class="section-note">Active view: <strong>{active_view}</strong>. Core indicators are selected from the chart picker, while Market Pulse and Options Flow run from their own quick-action buttons.</div>',
@@ -2009,6 +2255,12 @@ def main() -> None:
         st.plotly_chart(build_vix_fix_figure(vix_fix_data), use_container_width=True)
     elif active_view == "Squeeze Momentum":
         st.plotly_chart(build_squeeze_figure(squeeze_data), use_container_width=True)
+    elif active_view == "Nadaraya-Watson":
+        st.plotly_chart(build_nadaraya_figure(nadaraya_data), use_container_width=True)
+    elif active_view == "Lorentzian Classification":
+        st.plotly_chart(build_lorentzian_figure(lorentzian_data), use_container_width=True)
+    elif active_view == "CVD Divergence":
+        st.plotly_chart(build_cvd_figure(cvd_data), use_container_width=True)
     elif active_view == "Market Pulse":
         st.plotly_chart(build_market_figure(market_data), use_container_width=True)
     elif active_view == "Options Flow":
@@ -2031,9 +2283,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
 
