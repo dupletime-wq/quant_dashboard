@@ -38,6 +38,7 @@ CORE_DASHBOARD_VIEWS = [
     "Nadaraya-Watson",
     "Lorentzian Classification",
     "CVD Divergence",
+    "Canary Momentum",
 ]
 SPECIAL_ACTION_VIEWS = ["Market Pulse", "Options Flow"]
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
@@ -55,6 +56,17 @@ class DashboardSummary:
     stl_label: str
     market_label: str
     options_label: str
+
+
+LOOKBACK_PERIOD = "3y"
+REALTIME_LAGS = [21, 63, 126, 252]
+MONTHLY_LAGS = [1, 3, 6, 12]
+CANARY_TICKERS = ["TIP", "QQQ", "SPY", "VEA", "VWO", "BND"]
+ATTACK_TICKERS = ["QQQ", "SPY", "IWM", "VEA", "VWO", "VNQ", "DBC", "IEF", "TLT"]
+SAFE_ASSET = "BIL"
+CANARY_RULE = "all_positive"
+CANARY_MIN_POSITIVE = 4
+CANARY_ANALYZER_TICKERS = sorted(set(CANARY_TICKERS + ATTACK_TICKERS + [SAFE_ASSET]))
 
 
 def configure_page() -> None:
@@ -398,6 +410,231 @@ def download_stl_data(ticker: str) -> tuple[pd.DataFrame, str, str]:
             return frame, "Yahoo Finance fallback", candidate
 
     return pd.DataFrame(), "Unavailable", ticker.strip().upper()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def download_multi_close_data(tickers: list[str], period: str = LOOKBACK_PERIOD) -> pd.DataFrame:
+    raw = yf.download(
+        tickers=tickers,
+        period=period,
+        auto_adjust=True,
+        progress=False,
+        group_by="column",
+        threads=False,
+    )
+    if raw.empty:
+        return pd.DataFrame(columns=tickers)
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        if "Close" in raw.columns.get_level_values(0):
+            close = raw["Close"].copy()
+        elif "Adj Close" in raw.columns.get_level_values(0):
+            close = raw["Adj Close"].copy()
+        else:
+            return pd.DataFrame(columns=tickers)
+    else:
+        column = "Close" if "Close" in raw.columns else "Adj Close" if "Adj Close" in raw.columns else None
+        if column is None:
+            return pd.DataFrame(columns=tickers)
+        close = raw[[column]].copy()
+        close.columns = [tickers[0]]
+
+    close.index = normalize_datetime_index(close.index)
+    close = close.sort_index().ffill()
+    return close.reindex(columns=tickers)
+
+
+def resample_month_end(series: pd.Series) -> pd.Series:
+    try:
+        return series.resample("ME").last()
+    except ValueError:
+        return series.resample("M").last()
+
+
+def calc_avg_momentum(series: pd.Series, lags: list[int]) -> tuple[list[float], float]:
+    clean = series.dropna()
+    if clean.empty or len(clean) <= max(lags):
+        return [np.nan] * len(lags), np.nan
+    latest = float(clean.iloc[-1])
+    moments = [((latest / float(clean.iloc[-(lag + 1)])) - 1) * 100 for lag in lags]
+    return moments, float(np.mean(moments))
+
+
+def get_completed_monthly(series_daily: pd.Series, asof: pd.Timestamp | None = None) -> pd.Series:
+    anchor = pd.Timestamp.today().normalize() if asof is None else pd.Timestamp(asof).normalize()
+    monthly = resample_month_end(series_daily.dropna())
+    if len(monthly) and monthly.index[-1].to_period("M") == anchor.to_period("M"):
+        monthly = monthly.iloc[:-1]
+    return monthly
+
+
+def classify_momentum(avg_momentum: float, positive_text: str, negative_text: str) -> str:
+    if pd.isna(avg_momentum):
+        return "⚪ 데이터 부족"
+    return positive_text if avg_momentum > 0 else negative_text
+
+
+def decide_canary_regime(signal_map: pd.Series, rule: str = CANARY_RULE, min_positive: int = CANARY_MIN_POSITIVE) -> tuple[float, int, int, str]:
+    valid = signal_map.dropna()
+    total = int(valid.shape[0])
+    positive_count = int((valid > 0).sum())
+    if total == 0:
+        return np.nan, 0, 0, "⚪ 데이터 부족"
+    if rule == "tip_only":
+        if "TIP" not in valid.index:
+            return np.nan, positive_count, total, "⚪ 데이터 부족"
+        score = float(valid.loc["TIP"])
+        return score, positive_count, total, "🟢 공격" if score > 0 else "🔴 대피"
+    if rule == "majority":
+        threshold = int(np.ceil(total / 2))
+    elif rule == "at_least_n":
+        threshold = min_positive
+    else:
+        threshold = total
+    score = positive_count / total
+    return score, positive_count, total, "🟢 공격" if positive_count >= threshold else "🔴 대피"
+
+
+def pick_top_assets(df_assets: pd.DataFrame, score_column: str, top_n: int = 4) -> list[str]:
+    valid = df_assets.dropna(subset=[score_column]).sort_values(score_column, ascending=False)
+    return valid["자산"].head(top_n).tolist()
+
+
+def build_canary_report(data_daily: pd.DataFrame, asof: pd.Timestamp | None = None) -> pd.DataFrame:
+    records: list[list[Any]] = []
+    for ticker in CANARY_TICKERS:
+        daily_series = data_daily[ticker]
+        monthly_series = get_completed_monthly(daily_series, asof=asof)
+        rt_moms, rt_avg = calc_avg_momentum(daily_series, REALTIME_LAGS)
+        eom_moms, eom_avg = calc_avg_momentum(monthly_series, MONTHLY_LAGS)
+        records.append([
+            ticker,
+            round(eom_moms[0], 2) if not pd.isna(eom_moms[0]) else np.nan,
+            round(eom_moms[1], 2) if not pd.isna(eom_moms[1]) else np.nan,
+            round(eom_moms[2], 2) if not pd.isna(eom_moms[2]) else np.nan,
+            round(eom_moms[3], 2) if not pd.isna(eom_moms[3]) else np.nan,
+            round(eom_avg, 2) if not pd.isna(eom_avg) else np.nan,
+            classify_momentum(eom_avg, "🟢 유지", "🔴 대피"),
+            round(rt_moms[0], 2) if not pd.isna(rt_moms[0]) else np.nan,
+            round(rt_moms[1], 2) if not pd.isna(rt_moms[1]) else np.nan,
+            round(rt_moms[2], 2) if not pd.isna(rt_moms[2]) else np.nan,
+            round(rt_moms[3], 2) if not pd.isna(rt_moms[3]) else np.nan,
+            round(rt_avg, 2) if not pd.isna(rt_avg) else np.nan,
+            classify_momentum(rt_avg, "🟢 안전", "🔴 위험"),
+        ])
+    return pd.DataFrame(records, columns=[
+        "자산", "전월말 1M(%)", "전월말 3M(%)", "전월말 6M(%)", "전월말 12M 수익률(%)",
+        "전월말 평균 모멘텀(%)", "전월말 상태", "실시간 1M(%)", "실시간 3M(%)",
+        "실시간 6M(%)", "실시간 12M 수익률(%)", "실시간 평균 모멘텀(%)", "실시간 상태",
+    ])
+
+
+def build_attack_report(data_daily: pd.DataFrame, asof: pd.Timestamp | None = None) -> pd.DataFrame:
+    records: list[list[Any]] = []
+    for ticker in ATTACK_TICKERS:
+        daily_series = data_daily[ticker]
+        monthly_series = get_completed_monthly(daily_series, asof=asof)
+        rt_moms, rt_avg = calc_avg_momentum(daily_series, REALTIME_LAGS)
+        _, eom_avg = calc_avg_momentum(monthly_series, MONTHLY_LAGS)
+        records.append([
+            ticker,
+            round(eom_avg, 2) if not pd.isna(eom_avg) else np.nan,
+            round(rt_moms[0], 2) if not pd.isna(rt_moms[0]) else np.nan,
+            round(rt_moms[1], 2) if not pd.isna(rt_moms[1]) else np.nan,
+            round(rt_moms[2], 2) if not pd.isna(rt_moms[2]) else np.nan,
+            round(rt_moms[3], 2) if not pd.isna(rt_moms[3]) else np.nan,
+            round(rt_avg, 2) if not pd.isna(rt_avg) else np.nan,
+        ])
+    return pd.DataFrame(records, columns=[
+        "자산", "전월말 평균 모멘텀(%)", "실시간 1M(%)", "실시간 3M(%)",
+        "실시간 6M(%)", "실시간 12M 수익률(%)", "실시간 평균 모멘텀(%)",
+    ]).sort_values(by="실시간 평균 모멘텀(%)", ascending=False, na_position="last").reset_index(drop=True)
+
+
+def compute_canary_momentum_dashboard(period: str = LOOKBACK_PERIOD) -> dict[str, Any] | None:
+    data_daily = download_multi_close_data(CANARY_ANALYZER_TICKERS, period=period)
+    if data_daily.empty:
+        return None
+    asof = pd.Timestamp(data_daily.dropna(how="all").index[-1])
+    df_canary = build_canary_report(data_daily, asof=asof)
+    df_assets = build_attack_report(data_daily, asof=asof)
+    eom_signal = df_canary.set_index("자산")["전월말 평균 모멘텀(%)"]
+    rt_signal = df_canary.set_index("자산")["실시간 평균 모멘텀(%)"]
+    eom_score, eom_pos, eom_total, eom_status = decide_canary_regime(eom_signal)
+    rt_score, rt_pos, rt_total, rt_status = decide_canary_regime(rt_signal)
+    current_top4 = pick_top_assets(df_assets, "전월말 평균 모멘텀(%)")
+    predicted_top4 = pick_top_assets(df_assets, "실시간 평균 모멘텀(%)")
+    return {
+        "asof": asof,
+        "data_daily": data_daily,
+        "canary_report": df_canary,
+        "attack_report": df_assets,
+        "eom": {"score": eom_score, "positive": eom_pos, "total": eom_total, "status": eom_status, "top_assets": current_top4},
+        "realtime": {"score": rt_score, "positive": rt_pos, "total": rt_total, "status": rt_status, "top_assets": predicted_top4},
+    }
+
+
+def canary_signal_label(canary_data: dict[str, Any] | None) -> tuple[str, str]:
+    if not canary_data:
+        return "Not loaded", "neutral"
+    realtime = canary_data["realtime"]["status"]
+    eom = canary_data["eom"]["status"]
+    if realtime == "🟢 공격":
+        return f"Attack regime · {canary_data['realtime']['positive']}/{canary_data['realtime']['total']} positive", "bull"
+    if realtime == "🔴 대피":
+        return f"Defense regime · {canary_data['realtime']['positive']}/{canary_data['realtime']['total']} positive", "bear"
+    if eom == "🟢 공격":
+        return "Completed month remains in attack", "accent"
+    return "Insufficient canary data", "neutral"
+
+
+def build_canary_attack_figure(df_assets: pd.DataFrame) -> go.Figure:
+    view = df_assets.copy().sort_values("실시간 평균 모멘텀(%)", ascending=True)
+    colors = ["#0f766e" if (not pd.isna(v) and v >= 0) else "#b42318" for v in view["실시간 평균 모멘텀(%)"]]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=view["실시간 평균 모멘텀(%)"],
+        y=view["자산"],
+        orientation="h",
+        marker_color=colors,
+        text=view["실시간 평균 모멘텀(%)"].map(lambda v: "n/a" if pd.isna(v) else f"{v:.2f}%"),
+        textposition="outside",
+        name="실시간 평균 모멘텀",
+    ))
+    fig.add_vline(x=0, line_color="#64748b", line_dash="dot")
+    return apply_figure_style(fig, title="Attack Universe Real-time Momentum Ranking", height=560, showlegend=False)
+
+
+def render_canary_dashboard(canary_data: dict[str, Any]) -> None:
+    canary_label, canary_tone = canary_signal_label(canary_data)
+    cards = st.columns(4)
+    with cards[0]:
+        render_metric_card("Canary Rule", CANARY_RULE, f"Threshold setting {CANARY_MIN_POSITIVE}", "neutral")
+    with cards[1]:
+        render_metric_card("Completed Month", canary_data["eom"]["status"], f"{canary_data['eom']['positive']}/{canary_data['eom']['total']} canaries positive", "bull" if canary_data["eom"]["status"] == "🟢 공격" else "bear")
+    with cards[2]:
+        render_metric_card("Today", canary_data["realtime"]["status"], f"{canary_data['realtime']['positive']}/{canary_data['realtime']['total']} canaries positive", canary_tone)
+    with cards[3]:
+        top_assets = ", ".join(canary_data["realtime"]["top_assets"]) if canary_data["realtime"]["top_assets"] else SAFE_ASSET
+        render_metric_card("Expected Rotation", top_assets, f"Fallback safe asset {SAFE_ASSET}", "accent")
+
+    st.markdown('<div class="section-note">카나리아 자산(TIP, QQQ, SPY, VEA, VWO, BND)의 전월말 확정 모멘텀과 오늘 기준 실시간 모멘텀을 함께 비교해, 현재 포트폴리오와 다음 월말 리밸런싱 가능성을 한 번에 점검합니다.</div>', unsafe_allow_html=True)
+    st.plotly_chart(build_canary_attack_figure(canary_data["attack_report"]), use_container_width=True)
+
+    table_left, table_right = st.columns([1.15, 1.0])
+    with table_left:
+        st.markdown("#### 카나리아 상태 비교")
+        st.dataframe(canary_data["canary_report"], use_container_width=True, hide_index=True)
+    with table_right:
+        st.markdown("#### 공격 자산 모멘텀 순위")
+        st.dataframe(canary_data["attack_report"], use_container_width=True, hide_index=True)
+
+    st.markdown("#### 리밸런싱 액션 가이드")
+    eom = canary_data["eom"]
+    rt = canary_data["realtime"]
+    current_line = f"현재 포트폴리오(전월말 확정): {'공격 모드 유지 → ' + ', '.join(eom['top_assets']) if eom['status'] == '🟢 공격' else '안전 자산 대기 → ' + SAFE_ASSET if eom['status'] == '🔴 대피' else '데이터 부족'}"
+    future_line = f"월말 예측(오늘 종가 기준): {'공격 모드 유지 가능성 → ' + ', '.join(rt['top_assets']) if rt['status'] == '🟢 공격' else '안전 자산 이동 가능성 → ' + SAFE_ASSET if rt['status'] == '🔴 대피' else '데이터 부족'}"
+    st.markdown(f"- 기준 영업일: **{canary_data['asof'].strftime('%Y-%m-%d')}**\n- 실시간 요약: **{canary_label}**\n- {current_line}\n- {future_line}")
 
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -2012,6 +2249,7 @@ def render_header(
     nadaraya_data: pd.DataFrame | None,
     lorentzian_data: pd.DataFrame | None,
     cvd_data: dict[str, Any] | None,
+    canary_data: dict[str, Any] | None,
 ) -> None:
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     view_status_map = {
@@ -2025,6 +2263,7 @@ def render_header(
         "Nadaraya-Watson": (nadaraya_signal_label(nadaraya_data)[0], "Kernel regression trend and adaptive envelope."),
         "Lorentzian Classification": (lorentzian_signal_label(lorentzian_data)[0], "Nearest-neighbor style regime classification."),
         "CVD Divergence": (cvd_signal_label(cvd_data)[0], "Price swing versus cumulative delta disagreement."),
+        "Canary Momentum": (canary_signal_label(canary_data)[0], "Dual-speed canary regime and rotation ranking."),
         "Market Pulse": (market_data["status"][0] if market_data else "Not loaded", "Cross-asset risk appetite backdrop."),
         "Options Flow": (options_signal_label(options_data)[0], f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"),
     }
@@ -2048,6 +2287,8 @@ def render_header(
         active_tone = lorentzian_signal_label(lorentzian_data)[1]
     elif active_view == "CVD Divergence":
         active_tone = cvd_signal_label(cvd_data)[1]
+    elif active_view == "Canary Momentum":
+        active_tone = canary_signal_label(canary_data)[1]
     elif active_view == "Market Pulse" and market_data:
         active_tone = market_data["status"][1]
     elif active_view == "Options Flow":
@@ -2217,6 +2458,7 @@ def main() -> None:
     need_nadaraya = active_view == "Nadaraya-Watson"
     need_lorentzian = active_view == "Lorentzian Classification"
     need_cvd = active_view == "CVD Divergence"
+    need_canary = active_view == "Canary Momentum"
     need_market = active_view == "Market Pulse"
     need_options = active_view == "Options Flow"
 
@@ -2236,11 +2478,12 @@ def main() -> None:
         nadaraya_data = compute_nadaraya_watson(price_df) if need_nadaraya else None
         lorentzian_data = compute_lorentzian_classification(price_df) if need_lorentzian else None
         cvd_data = compute_cvd_divergence(price_df) if need_cvd else None
+        canary_data = compute_canary_momentum_dashboard(period=LOOKBACK_PERIOD) if need_canary else None
         market_data = compute_market_fear_greed() if need_market else None
         options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
-    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, nadaraya_data, lorentzian_data, cvd_data)
+    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, nadaraya_data, lorentzian_data, cvd_data, canary_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     st.markdown(
         f'<div class="section-note">Active view: <strong>{active_view}</strong>. Core indicators are selected from the chart picker, while Market Pulse and Options Flow run from their own quick-action buttons.</div>',
@@ -2271,6 +2514,11 @@ def main() -> None:
         st.plotly_chart(build_lorentzian_figure(lorentzian_data), use_container_width=True)
     elif active_view == "CVD Divergence":
         st.plotly_chart(build_cvd_figure(cvd_data), use_container_width=True)
+    elif active_view == "Canary Momentum":
+        if not canary_data:
+            st.info("Canary momentum data could not be loaded from Yahoo Finance for the required universe.")
+        else:
+            render_canary_dashboard(canary_data)
     elif active_view == "Market Pulse":
         st.plotly_chart(build_market_figure(market_data), use_container_width=True)
     elif active_view == "Options Flow":
