@@ -10,7 +10,7 @@ Streamlit 기반의 멀티 팩터 시장/종목 해석 대시보드입니다.
 - 순환/평균회귀: `Robust STL`
 - 구조/영역: `SMC`
 - 변동성 이벤트: `Williams Vix Fix`
-- 매크로 환경: `Market Pulse`, `Canary Momentum`
+- 매크로 환경/레짐: `Market Pulse`, `Canary Momentum`
 - 옵션 포지셔닝: `Options Flow`
 
 ## 1. 이 대시보드를 어떻게 써야 하나
@@ -53,13 +53,13 @@ streamlit run streamlit_app.py
 사이드바 컨트롤은 두 종류로 나뉩니다.
 
 - `Chart View`: 종목 기반 기술적 지표 모듈 선택
-- `Market Pulse`, `Options Flow`: 별도 버튼형 매크로/옵션 분석
+- `Market Pulse`, `Canary Momentum`, `Options Flow`: 별도 버튼형 매크로/레짐/옵션 분석
 
 왜 나눴는가:
 
-- `Market Pulse`는 개별 종목 차트와 성격이 다릅니다.
+- `Market Pulse`와 `Canary Momentum`는 개별 종목 차트보다 시장 환경/리밸런싱 해석에 가깝습니다.
 - `Options Flow`는 SPX 옵션체인 데이터를 별도 로드해야 하므로 일반 지표와 분리하는 편이 맞습니다.
-- 따라서 종목 기반 코어 차트와 매크로/옵션은 같은 드롭다운에 넣지 않고 분리했습니다.
+- 따라서 종목 기반 코어 차트와 매크로/레짐/옵션 모듈은 같은 드롭다운에 넣지 않고 분리했습니다.
 
 ## 4. 각 화면을 어떻게 해석해야 하나
 
