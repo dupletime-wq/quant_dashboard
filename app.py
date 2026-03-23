@@ -38,9 +38,8 @@ CORE_DASHBOARD_VIEWS = [
     "Nadaraya-Watson",
     "Lorentzian Classification",
     "CVD Divergence",
-    "Canary Momentum",
 ]
-SPECIAL_ACTION_VIEWS = ["Market Pulse", "Options Flow"]
+SPECIAL_ACTION_VIEWS = ["Market Pulse", "Canary Momentum", "Options Flow"]
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 
 
@@ -2340,10 +2339,11 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         index=CORE_DASHBOARD_VIEWS.index(last_core_view) if last_core_view in CORE_DASHBOARD_VIEWS else 0,
         key="dashboard_view_select",
     )
-    st.sidebar.caption("Macro / options quick actions")
-    pulse_col, options_col = st.sidebar.columns(2)
-    market_clicked = pulse_col.button(SPECIAL_ACTION_VIEWS[0], use_container_width=True)
-    options_clicked = options_col.button(SPECIAL_ACTION_VIEWS[1], use_container_width=True)
+    st.sidebar.caption("Macro / regime / options quick actions")
+    quick_action_cols = st.sidebar.columns(3)
+    market_clicked = quick_action_cols[0].button(SPECIAL_ACTION_VIEWS[0], use_container_width=True)
+    canary_clicked = quick_action_cols[1].button(SPECIAL_ACTION_VIEWS[1], use_container_width=True)
+    options_clicked = quick_action_cols[2].button(SPECIAL_ACTION_VIEWS[2], use_container_width=True)
     force_refresh = st.sidebar.checkbox("Force refresh cached data", value=False, key="force_refresh_toggle")
     if force_refresh:
         st.cache_data.clear()
@@ -2361,8 +2361,10 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         active_view = core_view
     if market_clicked:
         active_view = SPECIAL_ACTION_VIEWS[0]
-    elif options_clicked:
+    elif canary_clicked:
         active_view = SPECIAL_ACTION_VIEWS[1]
+    elif options_clicked:
+        active_view = SPECIAL_ACTION_VIEWS[2]
     st.session_state["last_core_view"] = core_view
     st.session_state["dashboard_view"] = active_view
 
@@ -2486,7 +2488,7 @@ def main() -> None:
     render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, nadaraya_data, lorentzian_data, cvd_data, canary_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     st.markdown(
-        f'<div class="section-note">Active view: <strong>{active_view}</strong>. Core indicators are selected from the chart picker, while Market Pulse and Options Flow run from their own quick-action buttons.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view}</strong>. Core indicators are selected from the chart picker, while Market Pulse, Canary Momentum, and Options Flow run from their own quick-action buttons.</div>',
         unsafe_allow_html=True,
     )
 
