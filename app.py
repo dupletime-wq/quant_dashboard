@@ -37,14 +37,12 @@ CORE_DASHBOARD_VIEWS = [
     "SuperTrend",
     "Williams Vix Fix",
     "Squeeze Momentum",
-    "Absolute Momentum",
-    "Donchian ATR Breakout",
-    "ADX/DMI Trend Strength",
 ]
 SPECIAL_ACTION_BUTTONS = [
     {"label": "Fear & Greed", "view": "Market Pulse", "caption": "Cross-asset risk appetite"},
     {"label": "Canary", "view": "Canary Momentum", "caption": "Risk-on/off rotation"},
     {"label": "Option Gamma", "view": "Options Flow", "caption": "SPX dealer positioning"},
+    {"label": "ETF Sortino", "view": "ETF Sortino Leadership", "caption": "ETF leadership and sector risk"},
 ]
 SPECIAL_ACTION_LABELS = {item["view"]: item["label"] for item in SPECIAL_ACTION_BUTTONS}
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
@@ -73,6 +71,44 @@ SAFE_ASSET = "BIL"
 CANARY_RULE = "all_positive"
 CANARY_MIN_POSITIVE = 4
 CANARY_ANALYZER_TICKERS = sorted(set(CANARY_TICKERS + ATTACK_TICKERS + [SAFE_ASSET]))
+DEFAULT_SORTINO_TOP_N = 30
+SORTINO_LOOKBACK_DAYS = 126
+SORTINO_ANNUALIZATION = 252
+SORTINO_SECTOR_TOP_COUNT = 20
+ETF_UNIVERSE_SEEDS = [
+    "SPY", "IVV", "VOO", "VTI", "ITOT", "SCHB", "QQQ", "QQQM", "DIA", "IWM", "IJH", "IJR",
+    "VUG", "SCHG", "VTV", "SCHV", "IWF", "IWD", "VBR", "VBK", "MTUM", "QUAL", "USMV", "VLUE",
+    "RSP", "NOBL", "SCHD", "DGRO", "VIG", "VO", "VB", "VEA", "IEFA", "VWO", "IEMG", "VXUS",
+    "XLF", "VFH", "KBE", "KRE", "XLY", "VCR", "XLP", "VDC", "XLE", "VDE", "XLI", "VIS", "XLK",
+    "VGT", "SMH", "SOXX", "IGV", "XLC", "VOX", "XLB", "VAW", "XLV", "VHT", "IBB", "XBI", "XLU",
+    "VPU", "XLRE", "VNQ", "REET", "ITA", "PAVE", "XME", "COPX", "URA", "LIT", "BOTZ", "ARKK",
+    "ARKW", "ARKQ", "ARKF", "ARKG", "ROBO", "SKYY", "CIBR", "HACK", "CLOU", "TAN", "ICLN",
+    "PBW", "QCLN", "KWEB", "FXI", "ASHR", "EWJ", "EWY", "EWT", "INDA", "EWH", "EWZ", "EWW",
+    "EWA", "EWC", "EWG", "EWU", "EWL", "EWS", "EIDO", "EPI", "MCHI", "FDN", "XRT", "XHB",
+]
+ETF_THEME_LABEL_MAP = {
+    "SPY": "Broad Market", "IVV": "Broad Market", "VOO": "Broad Market", "VTI": "Broad Market",
+    "ITOT": "Broad Market", "SCHB": "Broad Market", "QQQ": "Large Cap Growth", "QQQM": "Large Cap Growth",
+    "DIA": "Large Cap Value", "IWM": "Small Cap", "IJH": "Mid Cap", "IJR": "Small Cap",
+    "VUG": "Growth", "SCHG": "Growth", "VTV": "Value", "SCHV": "Value", "IWF": "Growth", "IWD": "Value",
+    "VBR": "Small Cap Value", "VBK": "Small Cap Growth", "MTUM": "Momentum", "QUAL": "Quality", "USMV": "Low Volatility",
+    "VLUE": "Value", "RSP": "Equal Weight", "NOBL": "Dividend", "SCHD": "Dividend", "DGRO": "Dividend", "VIG": "Dividend",
+    "VEA": "Developed Markets", "IEFA": "Developed Markets", "VWO": "Emerging Markets", "IEMG": "Emerging Markets", "VXUS": "International",
+    "XLF": "Financials", "VFH": "Financials", "KBE": "Banks", "KRE": "Regional Banks", "XLY": "Consumer Discretionary",
+    "VCR": "Consumer Discretionary", "XLP": "Consumer Staples", "VDC": "Consumer Staples", "XLE": "Energy", "VDE": "Energy",
+    "XLI": "Industrials", "VIS": "Industrials", "XLK": "Technology", "VGT": "Technology", "SMH": "Semiconductors", "SOXX": "Semiconductors",
+    "IGV": "Software", "XLC": "Communication Services", "VOX": "Communication Services", "XLB": "Materials", "VAW": "Materials",
+    "XLV": "Health Care", "VHT": "Health Care", "IBB": "Biotech", "XBI": "Biotech", "XLU": "Utilities", "VPU": "Utilities",
+    "XLRE": "Real Estate", "VNQ": "Real Estate", "REET": "Global Real Estate", "ITA": "Aerospace & Defense", "PAVE": "Infrastructure",
+    "XME": "Metals & Mining", "COPX": "Copper Miners", "URA": "Uranium", "LIT": "Battery Tech", "BOTZ": "Robotics & AI",
+    "ARKK": "Disruptive Innovation", "ARKW": "Internet Innovation", "ARKQ": "Autonomous Tech", "ARKF": "Fintech", "ARKG": "Genomics",
+    "ROBO": "Robotics", "SKYY": "Cloud", "CIBR": "Cybersecurity", "HACK": "Cybersecurity", "CLOU": "Cloud",
+    "TAN": "Solar", "ICLN": "Clean Energy", "PBW": "Clean Energy", "QCLN": "Clean Energy",
+    "KWEB": "China Internet", "FXI": "China Large Cap", "ASHR": "China A Shares", "EWJ": "Japan", "EWY": "Korea", "EWT": "Taiwan",
+    "INDA": "India", "EWH": "Hong Kong", "EWZ": "Brazil", "EWW": "Mexico", "EWA": "Australia", "EWC": "Canada",
+    "EWG": "Germany", "EWU": "United Kingdom", "EWL": "Switzerland", "EWS": "Singapore", "EIDO": "Indonesia", "EPI": "India", "MCHI": "China",
+    "FDN": "Internet", "XRT": "Retail", "XHB": "Homebuilders",
+}
 
 
 def configure_page() -> None:
@@ -1710,249 +1746,6 @@ def build_squeeze_figure(squeeze_df: pd.DataFrame) -> go.Figure:
     return apply_figure_style(fig, title="Squeeze Momentum", height=840)
 
 
-def compute_absolute_momentum(df: pd.DataFrame) -> pd.DataFrame:
-    work = df.copy()
-    returns = work["Close"].pct_change()
-    work["Ret1M"] = work["Close"].pct_change(21)
-    work["Ret3M"] = work["Close"].pct_change(63)
-    work["Ret6M"] = work["Close"].pct_change(126)
-    work["Ret12M"] = work["Close"].pct_change(252)
-    weighted_return = (
-        0.40 * work["Ret1M"]
-        + 0.30 * work["Ret3M"]
-        + 0.20 * work["Ret6M"]
-        + 0.10 * work["Ret12M"]
-    )
-    realized_vol = returns.rolling(63).std() * np.sqrt(21)
-    work["Momentum_Score"] = (weighted_return / realized_vol.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).clip(-3, 3)
-    work["Score_Slope"] = work["Momentum_Score"].diff(5)
-    work["Momentum_Baseline"] = work["Close"].rolling(63).mean()
-    work["Signal"] = np.select(
-        [work["Momentum_Score"] >= 0.75, work["Momentum_Score"] <= -0.75],
-        [1, -1],
-        default=0,
-    )
-    return work.tail(260).copy()
-
-
-def absolute_momentum_signal_label(momentum_df: pd.DataFrame | None) -> tuple[str, str]:
-    if momentum_df is None or momentum_df.empty:
-        return "Not loaded", "neutral"
-    latest_score = float(momentum_df["Momentum_Score"].iloc[-1])
-    latest_slope = float(momentum_df["Score_Slope"].fillna(0).iloc[-1])
-    if latest_score >= 0.75:
-        return ("Long momentum regime" if latest_slope >= 0 else "Long momentum, cooling"), "bull"
-    if latest_score <= -0.75:
-        return ("Defensive momentum regime" if latest_slope <= 0 else "Defensive but improving"), "bear"
-    if latest_score >= 0:
-        return "Constructive / neutral momentum", "accent"
-    return "Weak / neutral momentum", "neutral"
-
-
-def build_absolute_momentum_figure(momentum_df: pd.DataFrame) -> go.Figure:
-    view = momentum_df.copy()
-    slope_colors = np.where(view["Score_Slope"] >= 0, "#0f766e", "#b42318")
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-    fig.add_trace(
-        go.Candlestick(
-            x=view.index,
-            open=view["Open"],
-            high=view["High"],
-            low=view["Low"],
-            close=view["Close"],
-            increasing_line_color="#0f766e",
-            decreasing_line_color="#b42318",
-            name="Price",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(go.Scatter(x=view.index, y=view["Momentum_Baseline"], name="63D baseline", line=dict(color="#111827", width=1.8)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Momentum_Score"], name="Momentum score", line=dict(color="#2563eb", width=2.4)), row=2, col=1)
-    fig.add_trace(go.Bar(x=view.index, y=view["Score_Slope"], name="5D slope", marker_color=slope_colors, opacity=0.45), row=2, col=1)
-    fig.add_hline(y=0.75, line_color="#0f766e", line_dash="dot", row=2, col=1)
-    fig.add_hline(y=-0.75, line_color="#b42318", line_dash="dot", row=2, col=1)
-    fig.add_hline(y=0, line_color="#64748b", line_dash="dot", row=2, col=1)
-    return apply_figure_style(fig, title="Absolute Momentum", height=840)
-
-
-def compute_donchian_breakout(df: pd.DataFrame, fast_window: int = 20, slow_window: int = 55, atr_mult: float = 2.5) -> pd.DataFrame:
-    work = df.copy()
-    work["ATR"] = calc_atr(work, period=14)
-    work["Upper20"] = work["High"].rolling(fast_window).max().shift(1)
-    work["Lower20"] = work["Low"].rolling(fast_window).min().shift(1)
-    work["Upper55"] = work["High"].rolling(slow_window).max().shift(1)
-    work["Lower55"] = work["Low"].rolling(slow_window).min().shift(1)
-    work["LongSetup"] = (work["Close"] > work["Upper55"]) & (work["Close"].shift(1) > work["Upper55"].shift(1))
-    work["ShortSetup"] = (work["Close"] < work["Lower55"]) & (work["Close"].shift(1) < work["Lower55"].shift(1))
-
-    signal = pd.Series(0, index=work.index, dtype=int)
-    trail_stop = pd.Series(np.nan, index=work.index, dtype=float)
-    stop_buffer_atr = pd.Series(np.nan, index=work.index, dtype=float)
-    state = 0
-    trail_value = np.nan
-
-    for i in range(len(work)):
-        atr_value = work["ATR"].iat[i]
-        close_value = work["Close"].iat[i]
-        if np.isnan(atr_value) or np.isnan(work["Upper55"].iat[i]):
-            signal.iat[i] = state
-            trail_stop.iat[i] = trail_value if state != 0 else np.nan
-            continue
-
-        if state == 1:
-            trail_value = max(trail_value, close_value - atr_mult * atr_value) if not np.isnan(trail_value) else close_value - atr_mult * atr_value
-            if close_value < trail_value or close_value < work["Lower20"].iat[i]:
-                state = 0
-                trail_value = np.nan
-        elif state == -1:
-            trail_value = min(trail_value, close_value + atr_mult * atr_value) if not np.isnan(trail_value) else close_value + atr_mult * atr_value
-            if close_value > trail_value or close_value > work["Upper20"].iat[i]:
-                state = 0
-                trail_value = np.nan
-
-        if state == 0:
-            if bool(work["LongSetup"].iat[i]):
-                state = 1
-                trail_value = close_value - atr_mult * atr_value
-            elif bool(work["ShortSetup"].iat[i]):
-                state = -1
-                trail_value = close_value + atr_mult * atr_value
-
-        signal.iat[i] = state
-        trail_stop.iat[i] = trail_value if state != 0 else np.nan
-        if state == 1 and not np.isnan(trail_value):
-            stop_buffer_atr.iat[i] = (close_value - trail_value) / atr_value
-        elif state == -1 and not np.isnan(trail_value):
-            stop_buffer_atr.iat[i] = (trail_value - close_value) / atr_value
-
-    work["Signal"] = signal
-    work["Trail_Stop"] = trail_stop
-    work["Stop_Buffer_ATR"] = stop_buffer_atr
-    work["LongEntry"] = (work["Signal"] == 1) & (work["Signal"].shift(1).fillna(0) != 1)
-    work["ShortEntry"] = (work["Signal"] == -1) & (work["Signal"].shift(1).fillna(0) != -1)
-    return work.tail(260).copy()
-
-
-def donchian_signal_label(donchian_df: pd.DataFrame | None) -> tuple[str, str]:
-    if donchian_df is None or donchian_df.empty:
-        return "Not loaded", "neutral"
-    latest_signal = int(donchian_df["Signal"].iloc[-1])
-    latest_buffer = float(donchian_df["Stop_Buffer_ATR"].fillna(0).iloc[-1])
-    if latest_signal > 0:
-        return (f"Breakout trend active ({latest_buffer:.1f} ATR cushion)" if latest_buffer > 0 else "Breakout trend active"), "bull"
-    if latest_signal < 0:
-        return (f"Breakdown trend active ({latest_buffer:.1f} ATR cushion)" if latest_buffer > 0 else "Breakdown trend active"), "bear"
-    return "Inside Donchian range", "neutral"
-
-
-def build_donchian_figure(donchian_df: pd.DataFrame) -> go.Figure:
-    view = donchian_df.copy()
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.76, 0.24], vertical_spacing=0.05)
-    fig.add_trace(
-        go.Candlestick(
-            x=view.index,
-            open=view["Open"],
-            high=view["High"],
-            low=view["Low"],
-            close=view["Close"],
-            increasing_line_color="#0f766e",
-            decreasing_line_color="#b42318",
-            name="Price",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(go.Scatter(x=view.index, y=view["Upper20"], name="Upper 20D", line=dict(color="#94a3b8", width=1.2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Lower20"], name="Lower 20D", line=dict(color="#94a3b8", width=1.2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Upper55"], name="Upper 55D", line=dict(color="#2563eb", width=1.6, dash="dash")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Lower55"], name="Lower 55D", line=dict(color="#dd6b20", width=1.6, dash="dash")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Trail_Stop"], name="ATR trail stop", line=dict(color="#111827", width=2.0)), row=1, col=1)
-    long_entries = view[view["LongEntry"]]
-    short_entries = view[view["ShortEntry"]]
-    if not long_entries.empty:
-        fig.add_trace(go.Scatter(x=long_entries.index, y=long_entries["Low"] * 0.994, mode="markers", name="Long breakout", marker=dict(color="#0f766e", size=11, symbol="triangle-up")), row=1, col=1)
-    if not short_entries.empty:
-        fig.add_trace(go.Scatter(x=short_entries.index, y=short_entries["High"] * 1.006, mode="markers", name="Short breakout", marker=dict(color="#b42318", size=11, symbol="triangle-down")), row=1, col=1)
-    fig.add_trace(go.Bar(x=view.index, y=view["Stop_Buffer_ATR"], name="Stop buffer (ATR)", marker_color=np.where(view["Signal"] >= 0, "#0f766e", "#b42318"), opacity=0.45), row=2, col=1)
-    fig.add_hline(y=0, line_color="#64748b", line_dash="dot", row=2, col=1)
-    return apply_figure_style(fig, title="Donchian ATR Breakout", height=860)
-
-
-def compute_adx_trend_strength(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-    work = df.copy()
-    high_diff = work["High"].diff()
-    low_diff = -work["Low"].diff()
-    plus_dm = pd.Series(np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0), index=work.index)
-    minus_dm = pd.Series(np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0), index=work.index)
-
-    true_range = pd.concat(
-        [
-            work["High"] - work["Low"],
-            (work["High"] - work["Close"].shift(1)).abs(),
-            (work["Low"] - work["Close"].shift(1)).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    tr_smooth = true_range.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    plus_dm_smooth = plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    minus_dm_smooth = minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-
-    work["Plus_DI"] = 100 * plus_dm_smooth / tr_smooth.replace(0, np.nan)
-    work["Minus_DI"] = 100 * minus_dm_smooth / tr_smooth.replace(0, np.nan)
-    dx = 100 * (work["Plus_DI"] - work["Minus_DI"]).abs() / (work["Plus_DI"] + work["Minus_DI"]).replace(0, np.nan)
-    work["ADX"] = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    work["ADX_Slope"] = work["ADX"].diff(3)
-    work["Signal"] = np.select(
-        [(work["ADX"] >= 25) & (work["Plus_DI"] > work["Minus_DI"]), (work["ADX"] >= 25) & (work["Minus_DI"] > work["Plus_DI"])],
-        [1, -1],
-        default=0,
-    )
-    work["Trend_Baseline"] = work["Close"].rolling(21).mean()
-    return work.tail(260).copy()
-
-
-def adx_signal_label(adx_df: pd.DataFrame | None) -> tuple[str, str]:
-    if adx_df is None or adx_df.empty:
-        return "Not loaded", "neutral"
-    latest_adx = float(adx_df["ADX"].fillna(0).iloc[-1])
-    latest_signal = int(adx_df["Signal"].iloc[-1])
-    slope = float(adx_df["ADX_Slope"].fillna(0).iloc[-1])
-    if latest_signal > 0:
-        return (f"Strong bullish trend ({latest_adx:.1f})" if slope >= 0 else f"Bull trend fading ({latest_adx:.1f})"), "bull"
-    if latest_signal < 0:
-        return (f"Strong bearish trend ({latest_adx:.1f})" if slope >= 0 else f"Bear trend fading ({latest_adx:.1f})"), "bear"
-    if latest_adx >= 20:
-        return f"Transition trend ({latest_adx:.1f})", "accent"
-    return "Weak / range-bound trend", "neutral"
-
-
-def build_adx_figure(adx_df: pd.DataFrame) -> go.Figure:
-    view = adx_df.copy()
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.05)
-    fig.add_trace(
-        go.Candlestick(
-            x=view.index,
-            open=view["Open"],
-            high=view["High"],
-            low=view["Low"],
-            close=view["Close"],
-            increasing_line_color="#0f766e",
-            decreasing_line_color="#b42318",
-            name="Price",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(go.Scatter(x=view.index, y=view["Trend_Baseline"], name="21D baseline", line=dict(color="#111827", width=1.7)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["ADX"], name="ADX", line=dict(color="#7c3aed", width=2.4)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Plus_DI"], name="+DI", line=dict(color="#0f766e", width=1.8)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Minus_DI"], name="-DI", line=dict(color="#b42318", width=1.8)), row=2, col=1)
-    fig.add_hline(y=25, line_color="#64748b", line_dash="dot", row=2, col=1)
-    fig.add_hline(y=20, line_color="#cbd5e1", line_dash="dot", row=2, col=1)
-    return apply_figure_style(fig, title="ADX / DMI Trend Strength", height=840)
-
-
 def get_probability(series: pd.Series, window: int, inverse: bool = False) -> pd.Series:
     roll_mean = series.rolling(window=window).mean()
     roll_std = series.rolling(window=window).std()
@@ -2085,6 +1878,450 @@ def get_risk_free_rate() -> float:
         return float(irx["Close"].iloc[-1] / 100) if not irx.empty else 0.04
     except Exception:
         return 0.04
+
+
+def is_equity_etf(symbol: str, name: str = "", category: str = "", quote_type: str = "") -> bool:
+    symbol_upper = (symbol or "").upper()
+    text = " ".join(part for part in [name, category, quote_type] if part).lower()
+    excluded_terms = [
+        "bond", "treasury", "income", "ultra", "2x", "3x", "leveraged", "inverse", "short", "bear",
+        "volatility", "vix", "currency", "fx", "commodity", "gold", "silver", "oil", "gas", "bitcoin",
+        "crypto", "futures", "maturity", "single-stock", "single stock",
+    ]
+    if any(term in text for term in excluded_terms):
+        return False
+    excluded_symbols = {"SQQQ", "TQQQ", "SOXL", "SOXS", "SPXU", "UPRO", "TECL", "TECS", "UVXY", "SVXY"}
+    if symbol_upper in excluded_symbols:
+        return False
+    return True
+
+
+def extract_screen_quotes(screen_payload: Any) -> list[dict[str, Any]]:
+    if isinstance(screen_payload, list):
+        return [item for item in screen_payload if isinstance(item, dict)]
+    if not isinstance(screen_payload, dict):
+        return []
+    for key in ["quotes", "data", "items"]:
+        value = screen_payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = value.get("quotes")
+            if isinstance(nested, list):
+                return [item for item in nested if isinstance(item, dict)]
+    finance_result = screen_payload.get("finance", {}).get("result", [])
+    if finance_result and isinstance(finance_result[0], dict):
+        quotes = finance_result[0].get("quotes")
+        if isinstance(quotes, list):
+            return [item for item in quotes if isinstance(item, dict)]
+    return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_us_equity_etf_universe() -> pd.DataFrame:
+    candidates: dict[str, dict[str, Any]] = {symbol: {"Ticker": symbol, "ETF Name": symbol} for symbol in ETF_UNIVERSE_SEEDS}
+    screen_fn = getattr(yf, "screen", None)
+    if callable(screen_fn):
+        for query_name in ["most_actives", "day_gainers", "day_losers", "undervalued_growth_stocks", "aggressive_small_caps"]:
+            try:
+                payload = screen_fn(query_name, count=250)
+            except Exception:
+                continue
+            for item in extract_screen_quotes(payload):
+                symbol = str(item.get("symbol") or "").upper()
+                quote_type = str(item.get("quoteType") or item.get("typeDisp") or "")
+                name = str(item.get("shortName") or item.get("longName") or symbol)
+                if not symbol or ("ETF" not in quote_type.upper() and symbol not in ETF_THEME_LABEL_MAP):
+                    continue
+                if not is_equity_etf(symbol, name=name, quote_type=quote_type):
+                    continue
+                candidates[symbol] = {"Ticker": symbol, "ETF Name": name}
+    universe = pd.DataFrame(candidates.values()).drop_duplicates(subset=["Ticker"]).sort_values("Ticker").reset_index(drop=True)
+    return universe
+
+
+def normalize_sector_weights(raw_weights: Any) -> dict[str, float]:
+    if raw_weights is None:
+        return {}
+
+    parsed: dict[str, float] = {}
+    if isinstance(raw_weights, dict):
+        iterator = raw_weights.items()
+    elif isinstance(raw_weights, pd.Series):
+        iterator = raw_weights.to_dict().items()
+    elif isinstance(raw_weights, list):
+        temp: dict[str, float] = {}
+        for item in raw_weights:
+            if isinstance(item, dict):
+                sector_name = item.get("name") or item.get("sector") or item.get("label")
+                weight = item.get("value") or item.get("weight") or item.get("percentage")
+                if sector_name is not None and weight is not None:
+                    temp[str(sector_name)] = float(weight)
+        iterator = temp.items()
+    else:
+        return {}
+
+    for key, value in iterator:
+        try:
+            numeric = float(str(value).replace("%", "").replace(",", "").strip())
+        except Exception:
+            continue
+        if np.isnan(numeric):
+            continue
+        cleaned_key = str(key).replace("_", " ").replace("-", " ").title().strip()
+        parsed[cleaned_key] = numeric
+
+    if not parsed:
+        return {}
+    total = sum(abs(value) for value in parsed.values())
+    if total <= 0:
+        return {}
+    scale = 100.0 if total > 1.5 else 1.0
+    normalized = {key: value / scale for key, value in parsed.items()}
+    total_normalized = sum(abs(value) for value in normalized.values())
+    if total_normalized <= 0:
+        return {}
+    return {key: value / total_normalized for key, value in normalized.items() if value > 0}
+
+
+def extract_sector_weights_from_funds_data(funds_data: Any) -> dict[str, float]:
+    if funds_data is None:
+        return {}
+    if isinstance(funds_data, dict):
+        for key in ["sector_weightings", "sectorWeightings", "sectorWeights"]:
+            weights = normalize_sector_weights(funds_data.get(key))
+            if weights:
+                return weights
+        return {}
+    for attr in ["sector_weightings", "sectorWeightings", "sector_weights"]:
+        if hasattr(funds_data, attr):
+            weights = normalize_sector_weights(getattr(funds_data, attr))
+            if weights:
+                return weights
+    return {}
+
+
+def infer_etf_theme_label(ticker: str, etf_name: str, info: dict[str, Any] | None, sector_weights: dict[str, float]) -> str:
+    if sector_weights:
+        return max(sector_weights.items(), key=lambda item: item[1])[0]
+    if ticker in ETF_THEME_LABEL_MAP:
+        return ETF_THEME_LABEL_MAP[ticker]
+    if info:
+        for key in ["category", "fundFamily", "sector", "quoteType"]:
+            value = info.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().title()
+    name_lower = (etf_name or "").lower()
+    keyword_map = {
+        "semiconductor": "Semiconductors",
+        "software": "Software",
+        "technology": "Technology",
+        "financial": "Financials",
+        "health": "Health Care",
+        "energy": "Energy",
+        "industrial": "Industrials",
+        "real estate": "Real Estate",
+        "consumer": "Consumer",
+        "internet": "Internet",
+        "cloud": "Cloud",
+        "cyber": "Cybersecurity",
+        "dividend": "Dividend",
+        "momentum": "Momentum",
+        "quality": "Quality",
+    }
+    for keyword, label in keyword_map.items():
+        if keyword in name_lower:
+            return label
+    return "Broad Market"
+
+
+def safe_get_etf_metadata(ticker: str) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    sector_weights: dict[str, float] = {}
+    name = ticker
+    aum = np.nan
+    try:
+        instrument = yf.Ticker(ticker)
+        try:
+            info = instrument.get_info() or {}
+        except Exception:
+            info = getattr(instrument, "info", {}) or {}
+        name = str(info.get("longName") or info.get("shortName") or ticker)
+        aum_value = info.get("totalAssets") or info.get("netAssets")
+        aum = float(aum_value) if aum_value not in (None, "") else np.nan
+        try:
+            funds_data = instrument.get_funds_data() if hasattr(instrument, "get_funds_data") else getattr(instrument, "funds_data", None)
+        except Exception:
+            funds_data = getattr(instrument, "funds_data", None)
+        sector_weights = extract_sector_weights_from_funds_data(funds_data)
+    except Exception:
+        pass
+
+    label = infer_etf_theme_label(ticker, name, info, sector_weights)
+    return {
+        "Ticker": ticker,
+        "ETF Name": name,
+        "Theme/Sector Label": label,
+        "AUM": aum,
+        "Sector Weights": sector_weights,
+        "Sector Weight Coverage": float(sum(sector_weights.values())) if sector_weights else 0.0,
+    }
+
+
+def compute_sortino_ratio(series: pd.Series, annual_risk_free: float) -> tuple[float, float, float]:
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    if clean.shape[0] < SORTINO_LOOKBACK_DAYS:
+        return np.nan, np.nan, np.nan
+    daily_returns = clean.pct_change().dropna()
+    if daily_returns.empty:
+        return np.nan, np.nan, np.nan
+    daily_target = (1 + annual_risk_free) ** (1 / SORTINO_ANNUALIZATION) - 1
+    excess_returns = daily_returns - daily_target
+    downside_returns = np.minimum(excess_returns, 0.0)
+    downside_deviation = float(np.sqrt(np.mean(np.square(downside_returns))) * np.sqrt(SORTINO_ANNUALIZATION))
+    annualized_excess = float(excess_returns.mean() * SORTINO_ANNUALIZATION)
+    total_return = float(clean.iloc[-1] / clean.iloc[0] - 1)
+    if downside_deviation <= 0 or np.isnan(downside_deviation):
+        return np.nan, total_return, np.nan
+    return annualized_excess / downside_deviation, total_return, downside_deviation
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def compute_etf_sortino_leadership(top_n: int = DEFAULT_SORTINO_TOP_N) -> dict[str, Any] | None:
+    universe = fetch_us_equity_etf_universe()
+    if universe.empty:
+        return None
+
+    tickers = universe["Ticker"].tolist()
+    try:
+        raw = yf.download(
+            tickers=tickers,
+            period="1y",
+            auto_adjust=True,
+            progress=False,
+            group_by="column",
+            threads=False,
+        )
+    except Exception:
+        return None
+    if raw is None or raw.empty or not isinstance(raw.columns, pd.MultiIndex):
+        return None
+
+    try:
+        close_df = raw["Close"].copy()
+        volume_df = raw["Volume"].copy() if "Volume" in raw.columns.get_level_values(0) else pd.DataFrame(index=close_df.index, columns=close_df.columns)
+    except Exception:
+        return None
+
+    close_df.index = normalize_datetime_index(close_df.index)
+    volume_df.index = normalize_datetime_index(volume_df.index)
+    close_df = close_df.sort_index().ffill()
+    volume_df = volume_df.sort_index().fillna(0)
+
+    annual_rf = get_risk_free_rate()
+    records: list[dict[str, Any]] = []
+    for ticker in tickers:
+        if ticker not in close_df.columns:
+            continue
+        close_series = pd.to_numeric(close_df[ticker], errors="coerce").dropna()
+        if close_series.shape[0] < SORTINO_LOOKBACK_DAYS:
+            continue
+        sortino, six_month_return, downside_vol = compute_sortino_ratio(close_series.tail(SORTINO_LOOKBACK_DAYS + 1), annual_rf)
+        avg_dollar_volume = np.nan
+        if ticker in volume_df.columns:
+            vol_series = pd.to_numeric(volume_df[ticker], errors="coerce").reindex(close_series.index).fillna(0)
+            avg_dollar_volume = float((close_series * vol_series).tail(63).mean()) if not close_series.empty else np.nan
+        if np.isnan(avg_dollar_volume) or avg_dollar_volume < 2_000_000:
+            continue
+        records.append(
+            {
+                "Ticker": ticker,
+                "Sortino": sortino,
+                "6M Return": six_month_return,
+                "Downside Vol": downside_vol,
+                "Avg Dollar Volume": avg_dollar_volume,
+            }
+        )
+
+    if not records:
+        return None
+
+    ranking = pd.DataFrame(records)
+    ranking = ranking.sort_values(["Sortino", "Avg Dollar Volume"], ascending=[False, False], na_position="last").head(260).reset_index(drop=True)
+    ranking["Percentile"] = ranking["Sortino"].rank(pct=True, ascending=False).fillna(0)
+
+    enrich_count = max(top_n, SORTINO_SECTOR_TOP_COUNT)
+    metadata_rows = [safe_get_etf_metadata(ticker) for ticker in ranking["Ticker"].head(enrich_count)]
+    metadata_df = pd.DataFrame(metadata_rows)
+    ranking = ranking.merge(metadata_df, on="Ticker", how="left")
+    ranking["ETF Name"] = ranking["ETF Name"].fillna(ranking["Ticker"])
+    ranking["Theme/Sector Label"] = ranking["Theme/Sector Label"].fillna("Broad Market")
+    ranking["AUM or Avg Dollar Volume"] = np.where(
+        ranking["AUM"].notna(),
+        ranking["AUM"],
+        ranking["Avg Dollar Volume"],
+    )
+
+    top_ranked = ranking.head(top_n).copy()
+    sector_inputs = ranking.head(SORTINO_SECTOR_TOP_COUNT).copy()
+    sector_weights_agg: dict[str, float] = {}
+    covered_weight = 0.0
+    total_weight = 0.0
+    for _, row in sector_inputs.iterrows():
+        base_weight = float(row["AUM"]) if not np.isnan(row["AUM"]) and float(row["AUM"]) > 0 else 1.0
+        total_weight += base_weight
+        weights = row.get("Sector Weights") if isinstance(row.get("Sector Weights"), dict) else {}
+        if weights:
+            covered_weight += base_weight
+            for sector, weight in weights.items():
+                sector_weights_agg[sector] = sector_weights_agg.get(sector, 0.0) + base_weight * float(weight)
+
+    sector_df = pd.DataFrame(
+        [{"Sector": sector, "Share": value} for sector, value in sector_weights_agg.items()]
+    )
+    if not sector_df.empty:
+        sector_df["Share"] = sector_df["Share"] / sector_df["Share"].sum()
+        sector_df = sector_df.sort_values("Share", ascending=False).reset_index(drop=True)
+    coverage_ratio = covered_weight / total_weight if total_weight > 0 else 0.0
+    top_sector = sector_df.iloc[0]["Sector"] if not sector_df.empty else "Unavailable"
+    top_sector_share = float(sector_df.iloc[0]["Share"]) if not sector_df.empty else np.nan
+
+    sector_stats_rows = []
+    for _, row in sector_df.head(10).iterrows():
+        sector_name = row["Sector"]
+        contributor_count = int(
+            sum(
+                1
+                for weights in sector_inputs["Sector Weights"]
+                if isinstance(weights, dict) and sector_name in weights
+            )
+        )
+        sector_stats_rows.append(
+            {
+                "Sector": sector_name,
+                "Sector Share": row["Share"],
+                "Contributor ETFs": contributor_count,
+            }
+        )
+    sector_stats_df = pd.DataFrame(sector_stats_rows)
+
+    leaderboard_df = top_ranked[
+        [
+            "Ticker",
+            "ETF Name",
+            "Theme/Sector Label",
+            "Sortino",
+            "6M Return",
+            "Downside Vol",
+            "AUM or Avg Dollar Volume",
+            "Sector Weight Coverage",
+            "Percentile",
+        ]
+    ].copy()
+    return {
+        "universe_size": int(ranking.shape[0]),
+        "valid_sortino_count": int(ranking["Sortino"].notna().sum()),
+        "median_sortino": float(ranking["Sortino"].dropna().median()) if not ranking["Sortino"].dropna().empty else np.nan,
+        "top_etf": str(leaderboard_df.iloc[0]["Ticker"]) if not leaderboard_df.empty else "n/a",
+        "top_etf_name": str(leaderboard_df.iloc[0]["ETF Name"]) if not leaderboard_df.empty else "n/a",
+        "coverage_ratio": coverage_ratio,
+        "top_sector": top_sector,
+        "top_sector_share": top_sector_share,
+        "leaderboard": leaderboard_df,
+        "sector_share": sector_df,
+        "sector_stats": sector_stats_df,
+    }
+
+
+def etf_sortino_signal_label(sortino_data: dict[str, Any] | None) -> tuple[str, str]:
+    if not sortino_data:
+        return "ETF sortino unavailable", "neutral"
+    median_sortino = sortino_data.get("median_sortino", np.nan)
+    top_sector = sortino_data.get("top_sector", "Unavailable")
+    if np.isnan(median_sortino):
+        return "ETF sortino unavailable", "neutral"
+    if median_sortino >= 1.0:
+        return f"Risk-adjusted leadership strong · {top_sector}", "bull"
+    if median_sortino >= 0.5:
+        return f"Leadership constructive · {top_sector}", "accent"
+    return f"Leadership defensive · {top_sector}", "neutral"
+
+
+def build_etf_sortino_figure(leaderboard: pd.DataFrame) -> go.Figure:
+    view = leaderboard.head(20).copy().sort_values("Sortino", ascending=True)
+    colors = ["#0f766e" if not np.isnan(value) and value >= 0 else "#b42318" for value in view["Sortino"]]
+    labels = [f"{ticker} · {label}" for ticker, label in zip(view["Ticker"], view["Theme/Sector Label"])]
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=view["Sortino"],
+            y=labels,
+            orientation="h",
+            marker_color=colors,
+            text=view["Sortino"].map(lambda value: "n/a" if np.isnan(value) else f"{value:.2f}"),
+            textposition="outside",
+            name="Sortino",
+        )
+    )
+    fig.add_vline(x=0, line_color="#64748b", line_dash="dot")
+    return apply_figure_style(fig, title="ETF Sortino Leadership Ranking", height=760, showlegend=False)
+
+
+def build_etf_sector_share_figure(sector_df: pd.DataFrame) -> go.Figure:
+    view = sector_df.head(10).copy().sort_values("Share", ascending=True)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=view["Share"],
+            y=view["Sector"],
+            orientation="h",
+            marker_color="#2563eb",
+            text=view["Share"].map(lambda value: f"{value:.1%}"),
+            textposition="outside",
+            name="Sector share",
+        )
+    )
+    return apply_figure_style(fig, title="Top ETF Sector Share", height=620, showlegend=False)
+
+
+def render_etf_sortino_dashboard(sortino_data: dict[str, Any]) -> None:
+    summary_cards = st.columns(4)
+    with summary_cards[0]:
+        render_metric_card("Universe Size", f"{sortino_data['universe_size']}", "Liquid US equity ETFs screened", "neutral")
+    with summary_cards[1]:
+        render_metric_card("Valid Sortino", f"{sortino_data['valid_sortino_count']}", "Recent 6M sortino coverage", "neutral")
+    with summary_cards[2]:
+        render_metric_card("Median Sortino", "n/a" if np.isnan(sortino_data["median_sortino"]) else f"{sortino_data['median_sortino']:.2f}", "Cross-sectional median", "accent")
+    with summary_cards[3]:
+        render_metric_card("Top ETF", sortino_data["top_etf"], sortino_data["top_etf_name"], "bull")
+
+    render_plotly_chart(build_etf_sortino_figure(sortino_data["leaderboard"]))
+
+    table_left, table_right = st.columns([1.1, 0.9])
+    with table_left:
+        st.markdown("#### ETF Sortino Ranking")
+        ranking_table = sortino_data["leaderboard"].copy()
+        ranking_table["Sortino"] = ranking_table["Sortino"].map(lambda value: "n/a" if np.isnan(value) else f"{value:.2f}")
+        ranking_table["6M Return"] = ranking_table["6M Return"].map(format_pct)
+        ranking_table["Downside Vol"] = ranking_table["Downside Vol"].map(format_pct)
+        ranking_table["AUM or Avg Dollar Volume"] = ranking_table["AUM or Avg Dollar Volume"].map(lambda value: "n/a" if np.isnan(value) else f"{value / 1e9:,.2f}B")
+        ranking_table["Sector Weight Coverage"] = ranking_table["Sector Weight Coverage"].map(lambda value: "n/a" if np.isnan(value) else f"{value:.0%}")
+        ranking_table["Percentile"] = ranking_table["Percentile"].map(lambda value: "n/a" if np.isnan(value) else f"{value:.0%}")
+        st.dataframe(ranking_table, use_container_width=True, hide_index=True)
+    with table_right:
+        st.markdown("#### Sector Share")
+        if sortino_data["sector_share"].empty:
+            st.info("Sector holdings coverage is limited for the current ETF leadership set.")
+        else:
+            render_plotly_chart(build_etf_sector_share_figure(sortino_data["sector_share"]))
+            sector_stats = sortino_data["sector_stats"].copy()
+            sector_stats["Sector Share"] = sector_stats["Sector Share"].map(lambda value: f"{value:.1%}")
+            st.dataframe(sector_stats, use_container_width=True, hide_index=True)
+
+    st.markdown(
+        f'<div class="section-note">Top ETF leadership is ranked by 6M Sortino ratio using a daily risk-free hurdle. Sector share aggregates the top {SORTINO_SECTOR_TOP_COUNT} ETFs using holdings-based sector weights when available. Current leading sector: <strong>{sortino_data["top_sector"]}</strong>. Coverage ratio: <strong>{sortino_data["coverage_ratio"]:.0%}</strong>.</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _fetch_spx_options_payload() -> dict[str, Any] | None:
@@ -2383,81 +2620,6 @@ def format_pct(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.2f}%"
 
 
-def format_hit_rate(value: float) -> str:
-    return "n/a" if np.isnan(value) else f"{value:.0%}"
-
-
-def evaluate_signal_performance(
-    df: pd.DataFrame,
-    signal_col: str,
-    close_col: str = "Close",
-    lookback_bars: int = 756,
-) -> dict[str, Any]:
-    required = [signal_col, close_col]
-    if df is None or df.empty or any(col not in df.columns for col in required):
-        return {"signal_count": 0, "active_signal": 0, "persistence_days": 0, "windows": {}}
-
-    windows = [5, 10, 20]
-    view = df[required].copy().tail(lookback_bars + max(windows) + 5)
-    view[signal_col] = pd.to_numeric(view[signal_col], errors="coerce").fillna(0).astype(int)
-    view[close_col] = pd.to_numeric(view[close_col], errors="coerce")
-    signal = view[signal_col]
-    entry_signal = signal.where((signal != 0) & (signal != signal.shift(1).fillna(0)), 0)
-
-    current_signal = int(signal.iloc[-1]) if not signal.empty else 0
-    persistence_days = 0
-    if current_signal != 0:
-        for value in signal.iloc[::-1]:
-            if int(value) != current_signal:
-                break
-            persistence_days += 1
-
-    performance_windows: dict[int, dict[str, float]] = {}
-    for window in windows:
-        future_return = view[close_col].shift(-window) / view[close_col] - 1
-        mask = entry_signal != 0
-        signed_forward = future_return[mask] * entry_signal[mask]
-        performance_windows[window] = {
-            "hit_rate": float((signed_forward > 0).mean()) if not signed_forward.dropna().empty else np.nan,
-            "avg_return": float(signed_forward.mean()) if not signed_forward.dropna().empty else np.nan,
-        }
-
-    return {
-        "signal_count": int((entry_signal != 0).sum()),
-        "active_signal": current_signal,
-        "persistence_days": persistence_days,
-        "windows": performance_windows,
-    }
-
-
-def render_signal_scorecard(title: str, performance: dict[str, Any], active_label: str, tone: str) -> None:
-    st.markdown(f"#### {title}")
-    cards = st.columns(4)
-    with cards[0]:
-        render_metric_card("Signal Count", str(performance.get("signal_count", 0)), "Trailing 3y entry events", "neutral")
-    with cards[1]:
-        streak_value = f"{performance.get('persistence_days', 0)} bars"
-        render_metric_card("Active Streak", streak_value, active_label, tone)
-    with cards[2]:
-        hit_5d = performance.get("windows", {}).get(5, {})
-        render_metric_card("5D Hit Rate", format_hit_rate(hit_5d.get("hit_rate", np.nan)), f"Avg {format_pct(hit_5d.get('avg_return', np.nan))}", tone)
-    with cards[3]:
-        hit_20d = performance.get("windows", {}).get(20, {})
-        render_metric_card("20D Hit Rate", format_hit_rate(hit_20d.get("hit_rate", np.nan)), f"Avg {format_pct(hit_20d.get('avg_return', np.nan))}", tone)
-
-    scorecard_df = pd.DataFrame(
-        [
-            {
-                "Forward Window": f"{window}D",
-                "Hit Rate": format_hit_rate(values.get("hit_rate", np.nan)),
-                "Average Forward Return": format_pct(values.get("avg_return", np.nan)),
-            }
-            for window, values in performance.get("windows", {}).items()
-        ]
-    )
-    st.dataframe(scorecard_df, use_container_width=True, hide_index=True)
-
-
 def render_header(
     summary: DashboardSummary,
     active_view: str,
@@ -2466,9 +2628,7 @@ def render_header(
     supertrend_data: pd.DataFrame | None,
     vix_fix_data: pd.DataFrame | None,
     squeeze_data: pd.DataFrame | None,
-    absolute_momentum_data: pd.DataFrame | None,
-    donchian_data: pd.DataFrame | None,
-    adx_data: pd.DataFrame | None,
+    etf_sortino_data: dict[str, Any] | None,
     canary_data: dict[str, Any] | None,
 ) -> None:
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -2481,12 +2641,10 @@ def render_header(
         "SuperTrend": (supertrend_signal_label(supertrend_data)[0], "ATR band flips and live regime line."),
         "Williams Vix Fix": (vix_fix_signal_label(vix_fix_data)[0], "Panic/complacency spikes versus recent extremes."),
         "Squeeze Momentum": (squeeze_signal_label(squeeze_data)[0], "Bollinger versus Keltner compression state."),
-        "Absolute Momentum": (absolute_momentum_signal_label(absolute_momentum_data)[0], "Weighted 1/3/6/12M momentum normalized by realized volatility."),
-        "Donchian ATR Breakout": (donchian_signal_label(donchian_data)[0], "55D breakout filtered by persistence and ATR trailing stops."),
-        "ADX/DMI Trend Strength": (adx_signal_label(adx_data)[0], "Wilder trend strength and directional dominance."),
         "Canary Momentum": (canary_signal_label(canary_data)[0], "Dual-speed canary regime and rotation ranking."),
         "Market Pulse": (market_data["status"][0] if market_data else "Not loaded", "Cross-asset risk appetite backdrop."),
         "Options Flow": (options_signal_label(options_data)[0], f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"),
+        "ETF Sortino Leadership": (etf_sortino_signal_label(etf_sortino_data)[0], "Large US equity ETF leadership ranked by 6M Sortino ratio."),
     }
     active_status, active_subtitle = view_status_map.get(active_view, ("Loaded", ""))
     active_tone = "neutral"
@@ -2502,18 +2660,14 @@ def render_header(
         active_tone = vix_fix_signal_label(vix_fix_data)[1]
     elif active_view == "Squeeze Momentum":
         active_tone = squeeze_signal_label(squeeze_data)[1]
-    elif active_view == "Absolute Momentum":
-        active_tone = absolute_momentum_signal_label(absolute_momentum_data)[1]
-    elif active_view == "Donchian ATR Breakout":
-        active_tone = donchian_signal_label(donchian_data)[1]
-    elif active_view == "ADX/DMI Trend Strength":
-        active_tone = adx_signal_label(adx_data)[1]
     elif active_view == "Canary Momentum":
         active_tone = canary_signal_label(canary_data)[1]
     elif active_view == "Market Pulse" and market_data:
         active_tone = market_data["status"][1]
     elif active_view == "Options Flow":
         active_tone = options_signal_label(options_data)[1]
+    elif active_view == "ETF Sortino Leadership":
+        active_tone = etf_sortino_signal_label(etf_sortino_data)[1]
 
     st.markdown(
         f"""
@@ -2538,7 +2692,7 @@ def render_header(
     with cards[3]:
         render_metric_card(active_view_label, active_status, active_subtitle, active_tone)
 
-def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict[str, Any] | None]:
+def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict[str, Any] | None, int]:
     st.sidebar.subheader("Dashboard Controls")
 
     ticker = st.sidebar.text_input(
@@ -2566,7 +2720,7 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         <div class="sidebar-section-card">
             <div class="sidebar-section-eyebrow">Quick Access</div>
             <div class="sidebar-section-title">Special dashboards</div>
-            <div class="sidebar-section-copy">Open cross-asset pulse, canary regime, or SPX dealer gamma without touching the main chart picker.</div>
+            <div class="sidebar-section-copy">Open cross-asset pulse, canary regime, SPX dealer gamma, or ETF leadership without touching the main chart picker.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2601,6 +2755,15 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
     if active_view in SPECIAL_ACTION_LABELS:
         st.sidebar.caption(f"Active quick view: {display_view_name(active_view)}")
 
+    sortino_top_n = DEFAULT_SORTINO_TOP_N
+    if active_view == "ETF Sortino Leadership":
+        sortino_top_n = st.sidebar.selectbox(
+            "ETF Sortino Top N",
+            options=[20, 30, 50, 100],
+            index=[20, 30, 50, 100].index(DEFAULT_SORTINO_TOP_N),
+            key="etf_sortino_top_n_select",
+        )
+
     selected_expiry = None
     spx_payload = fetch_spx_options_payload()
     spx_expiries = extract_spx_expiries(spx_payload)
@@ -2616,7 +2779,7 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         st.session_state["selected_spx_expiry"] = selected_expiry
     else:
         st.sidebar.caption("SPX option chain is temporarily unavailable.")
-    return active_ticker, active_period, active_view, selected_expiry, spx_payload
+    return active_ticker, active_period, active_view, selected_expiry, spx_payload, sortino_top_n
 
 def render_data_status(price_df: pd.DataFrame, price_source: str, price_symbol: str, stl_df: pd.DataFrame | None, stl_source: str, stl_symbol: str) -> None:
     with st.sidebar.expander("Data diagnostics", expanded=False):
@@ -2675,7 +2838,7 @@ def build_signal_stack(
 def main() -> None:
     configure_page()
     apply_custom_style()
-    ticker, period, active_view, selected_expiry, spx_payload = render_sidebar(default_ticker="NVDA")
+    ticker, period, active_view, selected_expiry, spx_payload, sortino_top_n = render_sidebar(default_ticker="NVDA")
 
     with st.spinner(f"Loading data for {ticker}..."):
         price_df, price_source, price_symbol = download_price_data(ticker, period=period)
@@ -2690,12 +2853,10 @@ def main() -> None:
     need_supertrend = active_view == "SuperTrend"
     need_vix_fix = active_view == "Williams Vix Fix"
     need_squeeze = active_view == "Squeeze Momentum"
-    need_absolute_momentum = active_view == "Absolute Momentum"
-    need_donchian = active_view == "Donchian ATR Breakout"
-    need_adx = active_view == "ADX/DMI Trend Strength"
     need_canary = active_view == "Canary Momentum"
     need_market = active_view == "Market Pulse"
     need_options = active_view == "Options Flow"
+    need_etf_sortino = active_view == "ETF Sortino Leadership"
 
     with st.spinner("Computing dashboards..."):
         elder_df = compute_elder_impulse(price_df) if need_elder else None
@@ -2710,19 +2871,17 @@ def main() -> None:
         supertrend_data = compute_supertrend(price_df) if need_supertrend else None
         vix_fix_data = compute_williams_vix_fix(price_df) if need_vix_fix else None
         squeeze_data = compute_squeeze_momentum(price_df) if need_squeeze else None
-        absolute_momentum_data = compute_absolute_momentum(price_df) if need_absolute_momentum else None
-        donchian_data = compute_donchian_breakout(price_df) if need_donchian else None
-        adx_data = compute_adx_trend_strength(price_df) if need_adx else None
         canary_data = compute_canary_momentum_dashboard(period=LOOKBACK_PERIOD) if need_canary else None
         market_data = compute_market_fear_greed() if need_market else None
         options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
+        etf_sortino_data = compute_etf_sortino_leadership(top_n=sortino_top_n) if need_etf_sortino else None
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
-    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, absolute_momentum_data, donchian_data, adx_data, canary_data)
+    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, etf_sortino_data, canary_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     active_view_label = display_view_name(active_view)
     st.markdown(
-        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators are selected from the chart picker, while Fear &amp; Greed, Canary, and Option Gamma run from the quick-access buttons.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators are selected from the chart picker, while Fear &amp; Greed, Canary, Option Gamma, and ETF Sortino run from the quick-access buttons.</div>',
         unsafe_allow_html=True,
     )
 
@@ -2744,18 +2903,6 @@ def main() -> None:
         render_plotly_chart(build_vix_fix_figure(vix_fix_data))
     elif active_view == "Squeeze Momentum":
         render_plotly_chart(build_squeeze_figure(squeeze_data))
-    elif active_view == "Absolute Momentum":
-        momentum_label, momentum_tone = absolute_momentum_signal_label(absolute_momentum_data)
-        render_plotly_chart(build_absolute_momentum_figure(absolute_momentum_data))
-        render_signal_scorecard("Momentum Scorecard", evaluate_signal_performance(absolute_momentum_data, "Signal"), momentum_label, momentum_tone)
-    elif active_view == "Donchian ATR Breakout":
-        donchian_label, donchian_tone = donchian_signal_label(donchian_data)
-        render_plotly_chart(build_donchian_figure(donchian_data))
-        render_signal_scorecard("Breakout Scorecard", evaluate_signal_performance(donchian_data, "Signal"), donchian_label, donchian_tone)
-    elif active_view == "ADX/DMI Trend Strength":
-        adx_label, adx_tone = adx_signal_label(adx_data)
-        render_plotly_chart(build_adx_figure(adx_data))
-        render_signal_scorecard("Trend Strength Scorecard", evaluate_signal_performance(adx_data, "Signal"), adx_label, adx_tone)
     elif active_view == "Canary Momentum":
         if not canary_data:
             st.info("Canary momentum data could not be loaded from Yahoo Finance for the required universe.")
@@ -2780,8 +2927,13 @@ def main() -> None:
             with option_cards[3]:
                 render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e9:,.2f}B", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
             render_plotly_chart(build_options_figure(options_data, options_data["spot"]))
+    elif active_view == "ETF Sortino Leadership":
+        if not etf_sortino_data:
+            st.info("ETF Sortino leadership data could not be constructed from the current Yahoo Finance ETF universe and holdings coverage.")
+        else:
+            render_etf_sortino_dashboard(etf_sortino_data)
 
-    st.caption("Data sources: Yahoo Finance, FinanceDataReader, CBOE delayed quotes. Options analytics depend on listed option availability and delayed data quality.")
+    st.caption("Data sources: Yahoo Finance, FinanceDataReader, CBOE delayed quotes. ETF Sortino leadership depends on Yahoo ETF universe metadata, price history, and holdings coverage.")
 
 
 if __name__ == "__main__":
