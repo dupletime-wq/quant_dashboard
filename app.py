@@ -26,6 +26,8 @@ PLOT_FONT = {
     "color": "#102a43",
 }
 GRID_COLOR = "rgba(71, 85, 105, 0.18)"
+CHART_SURFACE_COLOR = "#fffaf4"
+PLOTLY_CONFIG = {"responsive": True, "displaylogo": False}
 KOREAN_SUFFIX_PATTERN = re.compile(r"^(?P<code>\d{6})\.(KS|KQ)$", re.IGNORECASE)
 CORE_DASHBOARD_VIEWS = [
     "Elder Impulse",
@@ -35,9 +37,9 @@ CORE_DASHBOARD_VIEWS = [
     "SuperTrend",
     "Williams Vix Fix",
     "Squeeze Momentum",
-    "Nadaraya-Watson",
-    "Lorentzian Classification",
-    "CVD Divergence"
+    "Absolute Momentum",
+    "Donchian ATR Breakout",
+    "ADX/DMI Trend Strength",
 ]
 SPECIAL_ACTION_BUTTONS = [
     {"label": "Fear & Greed", "view": "Market Pulse", "caption": "Cross-asset risk appetite"},
@@ -78,7 +80,7 @@ def configure_page() -> None:
         page_title="Quant Fusion Dashboard",
         page_icon="Q",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="auto",
     )
 
 
@@ -205,10 +207,11 @@ def apply_custom_style() -> None:
             box-shadow: 0 16px 34px rgba(15, 23, 42, 0.05);
         }
         div[data-testid="stPlotlyChart"] {
-            background: rgba(255,255,255,0.54);
+            background: #fffaf4;
             border-radius: 24px;
-            padding: 0.25rem;
-            border: 1px solid rgba(148, 163, 184, 0.14);
+            padding: 0.35rem;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            box-shadow: 0 16px 30px rgba(15, 23, 42, 0.05);
         }
         .signal-panel {
             background: rgba(255, 255, 255, 0.84);
@@ -284,6 +287,53 @@ def apply_custom_style() -> None:
             font-size: 0.8rem;
             line-height: 1.4;
         }
+        @media (max-width: 768px) {
+            .block-container {
+                padding-top: 0.8rem;
+                padding-right: 0.9rem;
+                padding-left: 0.9rem;
+                padding-bottom: 1.6rem;
+            }
+            .hero {
+                border-radius: 22px;
+                padding: 1.35rem 1.15rem;
+            }
+            .hero h1 {
+                font-size: 1.55rem;
+            }
+            .hero p {
+                font-size: 0.92rem;
+            }
+            .metric-card {
+                min-height: 6.4rem;
+                padding: 0.85rem 0.9rem;
+                border-radius: 18px;
+            }
+            .metric-value {
+                font-size: 1.3rem;
+            }
+            .metric-subtitle {
+                font-size: 0.84rem;
+            }
+            .quick-action-row-copy {
+                min-height: 2.8rem;
+                padding-left: 0.3rem;
+                font-size: 0.76rem;
+            }
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap;
+                gap: 0.7rem;
+            }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                min-width: calc(50% - 0.4rem);
+                flex: 1 1 calc(50% - 0.4rem);
+            }
+            div[data-testid="stPlotlyChart"] {
+                border-radius: 18px;
+                padding: 0.3rem;
+                background: #fffaf4;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -305,6 +355,10 @@ def render_metric_card(title: str, value: str, subtitle: str, tone: str = "neutr
 
 def display_view_name(view_name: str) -> str:
     return SPECIAL_ACTION_LABELS.get(view_name, view_name)
+
+
+def render_plotly_chart(fig: go.Figure) -> None:
+    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
 
 def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -684,7 +738,7 @@ def render_canary_dashboard(canary_data: dict[str, Any]) -> None:
         render_metric_card("Expected Rotation", top_assets, f"Fallback safe asset {SAFE_ASSET}", "accent")
 
     st.markdown('<div class="section-note">카나리아 자산(TIP, QQQ, SPY, VEA, VWO, BND)의 전월말 확정 모멘텀과 오늘 기준 실시간 모멘텀을 함께 비교해, 현재 포트폴리오와 다음 월말 리밸런싱 가능성을 한 번에 점검합니다.</div>', unsafe_allow_html=True)
-    st.plotly_chart(build_canary_attack_figure(canary_data["attack_report"]), use_container_width=True)
+    render_plotly_chart(build_canary_attack_figure(canary_data["attack_report"]))
 
     table_left, table_right = st.columns([1.15, 1.0])
     with table_left:
@@ -756,17 +810,17 @@ def apply_figure_style(
         title=dict(text=title, x=0.02, y=0.97, xanchor="left", yanchor="top"),
         height=height,
         margin=dict(l=22, r=22, t=92, b=18),
-        paper_bgcolor="rgba(255,255,255,0.0)",
-        plot_bgcolor="rgba(255,255,255,0.0)",
+        paper_bgcolor=CHART_SURFACE_COLOR,
+        plot_bgcolor=CHART_SURFACE_COLOR,
         font=PLOT_FONT,
         hovermode="x unified",
-        hoverlabel=dict(bgcolor="rgba(255,255,255,0.96)", font_size=13, font_family=PLOT_FONT["family"]),
+        hoverlabel=dict(bgcolor="#fffdf9", font_size=13, font_family=PLOT_FONT["family"]),
         showlegend=showlegend,
         legend=dict(
             orientation="h",
             y=legend_y,
             x=0,
-            bgcolor="rgba(255,255,255,0.72)",
+            bgcolor="rgba(255,253,249,0.94)",
             bordercolor="rgba(148, 163, 184, 0.18)",
             borderwidth=1,
         ),
@@ -1656,127 +1710,145 @@ def build_squeeze_figure(squeeze_df: pd.DataFrame) -> go.Figure:
     return apply_figure_style(fig, title="Squeeze Momentum", height=840)
 
 
-def compute_nadaraya_watson(df: pd.DataFrame, window: int = 80, bandwidth: float = 12.0) -> pd.DataFrame:
+def compute_absolute_momentum(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
-    closes = work["Close"].to_numpy(dtype=float)
-    estimate = np.full(len(work), np.nan)
+    returns = work["Close"].pct_change()
+    work["Ret1M"] = work["Close"].pct_change(21)
+    work["Ret3M"] = work["Close"].pct_change(63)
+    work["Ret6M"] = work["Close"].pct_change(126)
+    work["Ret12M"] = work["Close"].pct_change(252)
+    weighted_return = (
+        0.40 * work["Ret1M"]
+        + 0.30 * work["Ret3M"]
+        + 0.20 * work["Ret6M"]
+        + 0.10 * work["Ret12M"]
+    )
+    realized_vol = returns.rolling(63).std() * np.sqrt(21)
+    work["Momentum_Score"] = (weighted_return / realized_vol.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).clip(-3, 3)
+    work["Score_Slope"] = work["Momentum_Score"].diff(5)
+    work["Momentum_Baseline"] = work["Close"].rolling(63).mean()
+    work["Signal"] = np.select(
+        [work["Momentum_Score"] >= 0.75, work["Momentum_Score"] <= -0.75],
+        [1, -1],
+        default=0,
+    )
+    return work.tail(260).copy()
+
+
+def absolute_momentum_signal_label(momentum_df: pd.DataFrame | None) -> tuple[str, str]:
+    if momentum_df is None or momentum_df.empty:
+        return "Not loaded", "neutral"
+    latest_score = float(momentum_df["Momentum_Score"].iloc[-1])
+    latest_slope = float(momentum_df["Score_Slope"].fillna(0).iloc[-1])
+    if latest_score >= 0.75:
+        return ("Long momentum regime" if latest_slope >= 0 else "Long momentum, cooling"), "bull"
+    if latest_score <= -0.75:
+        return ("Defensive momentum regime" if latest_slope <= 0 else "Defensive but improving"), "bear"
+    if latest_score >= 0:
+        return "Constructive / neutral momentum", "accent"
+    return "Weak / neutral momentum", "neutral"
+
+
+def build_absolute_momentum_figure(momentum_df: pd.DataFrame) -> go.Figure:
+    view = momentum_df.copy()
+    slope_colors = np.where(view["Score_Slope"] >= 0, "#0f766e", "#b42318")
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+    fig.add_trace(
+        go.Candlestick(
+            x=view.index,
+            open=view["Open"],
+            high=view["High"],
+            low=view["Low"],
+            close=view["Close"],
+            increasing_line_color="#0f766e",
+            decreasing_line_color="#b42318",
+            name="Price",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=view.index, y=view["Momentum_Baseline"], name="63D baseline", line=dict(color="#111827", width=1.8)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Momentum_Score"], name="Momentum score", line=dict(color="#2563eb", width=2.4)), row=2, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["Score_Slope"], name="5D slope", marker_color=slope_colors, opacity=0.45), row=2, col=1)
+    fig.add_hline(y=0.75, line_color="#0f766e", line_dash="dot", row=2, col=1)
+    fig.add_hline(y=-0.75, line_color="#b42318", line_dash="dot", row=2, col=1)
+    fig.add_hline(y=0, line_color="#64748b", line_dash="dot", row=2, col=1)
+    return apply_figure_style(fig, title="Absolute Momentum", height=840)
+
+
+def compute_donchian_breakout(df: pd.DataFrame, fast_window: int = 20, slow_window: int = 55, atr_mult: float = 2.5) -> pd.DataFrame:
+    work = df.copy()
+    work["ATR"] = calc_atr(work, period=14)
+    work["Upper20"] = work["High"].rolling(fast_window).max().shift(1)
+    work["Lower20"] = work["Low"].rolling(fast_window).min().shift(1)
+    work["Upper55"] = work["High"].rolling(slow_window).max().shift(1)
+    work["Lower55"] = work["Low"].rolling(slow_window).min().shift(1)
+    work["LongSetup"] = (work["Close"] > work["Upper55"]) & (work["Close"].shift(1) > work["Upper55"].shift(1))
+    work["ShortSetup"] = (work["Close"] < work["Lower55"]) & (work["Close"].shift(1) < work["Lower55"].shift(1))
+
+    signal = pd.Series(0, index=work.index, dtype=int)
+    trail_stop = pd.Series(np.nan, index=work.index, dtype=float)
+    stop_buffer_atr = pd.Series(np.nan, index=work.index, dtype=float)
+    state = 0
+    trail_value = np.nan
+
     for i in range(len(work)):
-        start = max(0, i - window + 1)
-        idx = np.arange(start, i + 1)
-        distances = (idx - i) / bandwidth
-        weights = np.exp(-0.5 * distances**2)
-        estimate[i] = np.dot(weights, closes[start : i + 1]) / weights.sum()
-
-    work["NW_Estimate"] = estimate
-    residual = work["Close"] - work["NW_Estimate"]
-    band = residual.rolling(20).std().fillna(0) * 1.5
-    work["NW_Upper"] = work["NW_Estimate"] + band
-    work["NW_Lower"] = work["NW_Estimate"] - band
-    work["NW_Slope"] = pd.Series(estimate, index=work.index).diff()
-    work["NW_Trend"] = np.where(work["NW_Slope"] > 0, 1, np.where(work["NW_Slope"] < 0, -1, 0))
-    return work.tail(240).copy()
-
-
-def nadaraya_signal_label(nw_df: pd.DataFrame | None) -> tuple[str, str]:
-    if nw_df is None or nw_df.empty:
-        return "Not loaded", "neutral"
-    latest = int(nw_df["NW_Trend"].iloc[-1])
-    if latest > 0:
-        return "Kernel trend rising", "bull"
-    if latest < 0:
-        return "Kernel trend falling", "bear"
-    return "Kernel trend flat", "neutral"
-
-
-def build_nadaraya_figure(nw_df: pd.DataFrame) -> go.Figure:
-    view = nw_df.copy()
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.78, 0.22], vertical_spacing=0.05)
-    fig.add_trace(
-        go.Candlestick(
-            x=view.index,
-            open=view["Open"],
-            high=view["High"],
-            low=view["Low"],
-            close=view["Close"],
-            increasing_line_color="#0f766e",
-            decreasing_line_color="#b42318",
-            name="Price",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(go.Scatter(x=view.index, y=view["NW_Estimate"], name="NW estimate", line=dict(color="#111827", width=2.2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["NW_Upper"], name="Upper band", line=dict(color="#2563eb", width=1.4, dash="dot")), row=1, col=1)
-    fig.add_trace(
-        go.Scatter(
-            x=view.index,
-            y=view["NW_Lower"],
-            name="Lower band",
-            line=dict(color="#2563eb", width=1.4, dash="dot"),
-            fill="tonexty",
-            fillcolor="rgba(37,99,235,0.08)",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(go.Bar(x=view.index, y=view["NW_Slope"], name="Slope", marker_color=np.where(view["NW_Slope"] >= 0, "#0f766e", "#b42318")), row=2, col=1)
-    fig.add_hline(y=0, line_color="#64748b", line_width=1, line_dash="dot", row=2, col=1)
-    return apply_figure_style(fig, title="Nadaraya-Watson Estimator", height=840)
-
-
-def compute_lorentzian_classification(df: pd.DataFrame, lookback: int = 180, neighbors: int = 8, horizon: int = 4) -> pd.DataFrame:
-    work = df.copy()
-    work["RSI"] = calc_rsi(work["Close"])
-    work["Ret5"] = work["Close"].pct_change(5).mul(100)
-    work["Dist20"] = ((work["Close"] / work["Close"].rolling(20).mean()) - 1).mul(100)
-    work["ATR_Norm"] = (calc_atr(work, 14) / work["Close"]).mul(100)
-    feature_cols = ["RSI", "Ret5", "Dist20", "ATR_Norm"]
-    features = work[feature_cols].fillna(0).to_numpy(dtype=float)
-    future_label = np.sign(work["Close"].shift(-horizon) - work["Close"]).to_numpy(dtype=float)
-
-    score = np.full(len(work), np.nan)
-    confidence = np.full(len(work), np.nan)
-    regime = np.zeros(len(work), dtype=int)
-
-    for i in range(max(lookback, 30), len(work) - horizon):
-        start = max(20, i - lookback)
-        distances: list[tuple[float, float]] = []
-        for j in range(start, i):
-            if np.isnan(future_label[j]) or future_label[j] == 0:
-                continue
-            dist = float(np.log1p(np.abs(features[i] - features[j])).sum())
-            distances.append((dist, future_label[j]))
-        if not distances:
+        atr_value = work["ATR"].iat[i]
+        close_value = work["Close"].iat[i]
+        if np.isnan(atr_value) or np.isnan(work["Upper55"].iat[i]):
+            signal.iat[i] = state
+            trail_stop.iat[i] = trail_value if state != 0 else np.nan
             continue
-        nearest = sorted(distances, key=lambda item: item[0])[:neighbors]
-        raw_score = sum(item[1] for item in nearest)
-        score[i] = raw_score
-        confidence[i] = abs(raw_score) / neighbors
-        regime[i] = 1 if raw_score > 0 else -1 if raw_score < 0 else 0
 
-    work["LC_Score"] = score
-    work["LC_Confidence"] = confidence
-    work["LC_Regime"] = regime
-    work["LC_LongFlip"] = (work["LC_Regime"] == 1) & (work["LC_Regime"].shift(1) <= 0)
-    work["LC_ShortFlip"] = (work["LC_Regime"] == -1) & (work["LC_Regime"].shift(1) >= 0)
-    return work.tail(240).copy()
+        if state == 1:
+            trail_value = max(trail_value, close_value - atr_mult * atr_value) if not np.isnan(trail_value) else close_value - atr_mult * atr_value
+            if close_value < trail_value or close_value < work["Lower20"].iat[i]:
+                state = 0
+                trail_value = np.nan
+        elif state == -1:
+            trail_value = min(trail_value, close_value + atr_mult * atr_value) if not np.isnan(trail_value) else close_value + atr_mult * atr_value
+            if close_value > trail_value or close_value > work["Upper20"].iat[i]:
+                state = 0
+                trail_value = np.nan
+
+        if state == 0:
+            if bool(work["LongSetup"].iat[i]):
+                state = 1
+                trail_value = close_value - atr_mult * atr_value
+            elif bool(work["ShortSetup"].iat[i]):
+                state = -1
+                trail_value = close_value + atr_mult * atr_value
+
+        signal.iat[i] = state
+        trail_stop.iat[i] = trail_value if state != 0 else np.nan
+        if state == 1 and not np.isnan(trail_value):
+            stop_buffer_atr.iat[i] = (close_value - trail_value) / atr_value
+        elif state == -1 and not np.isnan(trail_value):
+            stop_buffer_atr.iat[i] = (trail_value - close_value) / atr_value
+
+    work["Signal"] = signal
+    work["Trail_Stop"] = trail_stop
+    work["Stop_Buffer_ATR"] = stop_buffer_atr
+    work["LongEntry"] = (work["Signal"] == 1) & (work["Signal"].shift(1).fillna(0) != 1)
+    work["ShortEntry"] = (work["Signal"] == -1) & (work["Signal"].shift(1).fillna(0) != -1)
+    return work.tail(260).copy()
 
 
-def lorentzian_signal_label(lc_df: pd.DataFrame | None) -> tuple[str, str]:
-    if lc_df is None or lc_df.empty:
+def donchian_signal_label(donchian_df: pd.DataFrame | None) -> tuple[str, str]:
+    if donchian_df is None or donchian_df.empty:
         return "Not loaded", "neutral"
-    latest = int(lc_df["LC_Regime"].iloc[-1])
-    confidence = float(lc_df["LC_Confidence"].fillna(0).iloc[-1])
-    if latest > 0:
-        return f"Bullish class ({confidence:.0%})", "bull"
-    if latest < 0:
-        return f"Bearish class ({confidence:.0%})", "bear"
-    return "Classification neutral", "neutral"
+    latest_signal = int(donchian_df["Signal"].iloc[-1])
+    latest_buffer = float(donchian_df["Stop_Buffer_ATR"].fillna(0).iloc[-1])
+    if latest_signal > 0:
+        return (f"Breakout trend active ({latest_buffer:.1f} ATR cushion)" if latest_buffer > 0 else "Breakout trend active"), "bull"
+    if latest_signal < 0:
+        return (f"Breakdown trend active ({latest_buffer:.1f} ATR cushion)" if latest_buffer > 0 else "Breakdown trend active"), "bear"
+    return "Inside Donchian range", "neutral"
 
 
-def build_lorentzian_figure(lc_df: pd.DataFrame) -> go.Figure:
-    view = lc_df.copy()
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.05)
+def build_donchian_figure(donchian_df: pd.DataFrame) -> go.Figure:
+    view = donchian_df.copy()
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.76, 0.24], vertical_spacing=0.05)
     fig.add_trace(
         go.Candlestick(
             x=view.index,
@@ -1791,63 +1863,73 @@ def build_lorentzian_figure(lc_df: pd.DataFrame) -> go.Figure:
         row=1,
         col=1,
     )
-    fig.add_trace(go.Scatter(x=view.index, y=view["Close"].rolling(20).mean(), name="MA 20", line=dict(color="#111827", width=1.5)), row=1, col=1)
-    long_flips = view[view["LC_LongFlip"]]
-    short_flips = view[view["LC_ShortFlip"]]
-    if not long_flips.empty:
-        fig.add_trace(go.Scatter(x=long_flips.index, y=long_flips["Low"] * 0.995, mode="markers", name="Bull flip", marker=dict(color="#0f766e", size=11, symbol="triangle-up")), row=1, col=1)
-    if not short_flips.empty:
-        fig.add_trace(go.Scatter(x=short_flips.index, y=short_flips["High"] * 1.005, mode="markers", name="Bear flip", marker=dict(color="#b42318", size=11, symbol="triangle-down")), row=1, col=1)
-    fig.add_trace(go.Bar(x=view.index, y=view["LC_Score"], name="Lorentzian score", marker_color=np.where(view["LC_Score"] >= 0, "#0f766e", "#b42318")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["LC_Confidence"], name="Confidence", line=dict(color="#2563eb", width=1.8)), row=2, col=1)
-    fig.add_hline(y=0, line_color="#64748b", line_width=1, line_dash="dot", row=2, col=1)
-    return apply_figure_style(fig, title="Lorentzian Classification", height=840)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Upper20"], name="Upper 20D", line=dict(color="#94a3b8", width=1.2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Lower20"], name="Lower 20D", line=dict(color="#94a3b8", width=1.2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Upper55"], name="Upper 55D", line=dict(color="#2563eb", width=1.6, dash="dash")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Lower55"], name="Lower 55D", line=dict(color="#dd6b20", width=1.6, dash="dash")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Trail_Stop"], name="ATR trail stop", line=dict(color="#111827", width=2.0)), row=1, col=1)
+    long_entries = view[view["LongEntry"]]
+    short_entries = view[view["ShortEntry"]]
+    if not long_entries.empty:
+        fig.add_trace(go.Scatter(x=long_entries.index, y=long_entries["Low"] * 0.994, mode="markers", name="Long breakout", marker=dict(color="#0f766e", size=11, symbol="triangle-up")), row=1, col=1)
+    if not short_entries.empty:
+        fig.add_trace(go.Scatter(x=short_entries.index, y=short_entries["High"] * 1.006, mode="markers", name="Short breakout", marker=dict(color="#b42318", size=11, symbol="triangle-down")), row=1, col=1)
+    fig.add_trace(go.Bar(x=view.index, y=view["Stop_Buffer_ATR"], name="Stop buffer (ATR)", marker_color=np.where(view["Signal"] >= 0, "#0f766e", "#b42318"), opacity=0.45), row=2, col=1)
+    fig.add_hline(y=0, line_color="#64748b", line_dash="dot", row=2, col=1)
+    return apply_figure_style(fig, title="Donchian ATR Breakout", height=860)
 
 
-def compute_cvd_divergence(df: pd.DataFrame) -> dict[str, Any]:
+def compute_adx_trend_strength(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     work = df.copy()
-    candle_range = (work["High"] - work["Low"]).replace(0, np.nan)
-    body_pressure = ((work["Close"] - work["Open"]) / candle_range).clip(-1, 1).fillna(0)
-    work["Delta"] = work["Volume"] * body_pressure
-    work["CVD"] = work["Delta"].cumsum()
-    view = work.tail(240).copy()
+    high_diff = work["High"].diff()
+    low_diff = -work["Low"].diff()
+    plus_dm = pd.Series(np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0), index=work.index)
+    minus_dm = pd.Series(np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0), index=work.index)
 
-    price_high_idx = argrelextrema(view["High"].to_numpy(), np.greater_equal, order=5)[0]
-    price_low_idx = argrelextrema(view["Low"].to_numpy(), np.less_equal, order=5)[0]
-    divergence: dict[str, Any] = {"type": "neutral", "points": []}
+    true_range = pd.concat(
+        [
+            work["High"] - work["Low"],
+            (work["High"] - work["Close"].shift(1)).abs(),
+            (work["Low"] - work["Close"].shift(1)).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    tr_smooth = true_range.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    plus_dm_smooth = plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    minus_dm_smooth = minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
 
-    if len(price_low_idx) >= 2:
-        p1, p2 = price_low_idx[-2], price_low_idx[-1]
-        if view["Low"].iat[p2] < view["Low"].iat[p1] and view["CVD"].iat[p2] > view["CVD"].iat[p1]:
-            divergence = {
-                "type": "bullish",
-                "points": [(view.index[p1], float(view["Low"].iat[p1]), float(view["CVD"].iat[p1])), (view.index[p2], float(view["Low"].iat[p2]), float(view["CVD"].iat[p2]))],
-            }
-    if divergence["type"] == "neutral" and len(price_high_idx) >= 2:
-        p1, p2 = price_high_idx[-2], price_high_idx[-1]
-        if view["High"].iat[p2] > view["High"].iat[p1] and view["CVD"].iat[p2] < view["CVD"].iat[p1]:
-            divergence = {
-                "type": "bearish",
-                "points": [(view.index[p1], float(view["High"].iat[p1]), float(view["CVD"].iat[p1])), (view.index[p2], float(view["High"].iat[p2]), float(view["CVD"].iat[p2]))],
-            }
-    return {"view": view, "divergence": divergence}
+    work["Plus_DI"] = 100 * plus_dm_smooth / tr_smooth.replace(0, np.nan)
+    work["Minus_DI"] = 100 * minus_dm_smooth / tr_smooth.replace(0, np.nan)
+    dx = 100 * (work["Plus_DI"] - work["Minus_DI"]).abs() / (work["Plus_DI"] + work["Minus_DI"]).replace(0, np.nan)
+    work["ADX"] = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    work["ADX_Slope"] = work["ADX"].diff(3)
+    work["Signal"] = np.select(
+        [(work["ADX"] >= 25) & (work["Plus_DI"] > work["Minus_DI"]), (work["ADX"] >= 25) & (work["Minus_DI"] > work["Plus_DI"])],
+        [1, -1],
+        default=0,
+    )
+    work["Trend_Baseline"] = work["Close"].rolling(21).mean()
+    return work.tail(260).copy()
 
 
-def cvd_signal_label(cvd_data: dict[str, Any] | None) -> tuple[str, str]:
-    if cvd_data is None:
+def adx_signal_label(adx_df: pd.DataFrame | None) -> tuple[str, str]:
+    if adx_df is None or adx_df.empty:
         return "Not loaded", "neutral"
-    divergence_type = cvd_data["divergence"]["type"]
-    if divergence_type == "bullish":
-        return "Bullish CVD divergence", "bull"
-    if divergence_type == "bearish":
-        return "Bearish CVD divergence", "bear"
-    return "No active divergence", "neutral"
+    latest_adx = float(adx_df["ADX"].fillna(0).iloc[-1])
+    latest_signal = int(adx_df["Signal"].iloc[-1])
+    slope = float(adx_df["ADX_Slope"].fillna(0).iloc[-1])
+    if latest_signal > 0:
+        return (f"Strong bullish trend ({latest_adx:.1f})" if slope >= 0 else f"Bull trend fading ({latest_adx:.1f})"), "bull"
+    if latest_signal < 0:
+        return (f"Strong bearish trend ({latest_adx:.1f})" if slope >= 0 else f"Bear trend fading ({latest_adx:.1f})"), "bear"
+    if latest_adx >= 20:
+        return f"Transition trend ({latest_adx:.1f})", "accent"
+    return "Weak / range-bound trend", "neutral"
 
 
-def build_cvd_figure(cvd_data: dict[str, Any]) -> go.Figure:
-    view = cvd_data["view"]
-    divergence = cvd_data["divergence"]
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.62, 0.38], vertical_spacing=0.05)
+def build_adx_figure(adx_df: pd.DataFrame) -> go.Figure:
+    view = adx_df.copy()
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.05)
     fig.add_trace(
         go.Candlestick(
             x=view.index,
@@ -1862,15 +1944,13 @@ def build_cvd_figure(cvd_data: dict[str, Any]) -> go.Figure:
         row=1,
         col=1,
     )
-    fig.add_trace(go.Bar(x=view.index, y=view["Delta"], name="Delta", marker_color=np.where(view["Delta"] >= 0, "#0f766e", "#b42318"), opacity=0.35), row=2, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["CVD"], name="CVD", line=dict(color="#111827", width=2.0)), row=2, col=1)
-    if divergence["type"] != "neutral":
-        p1, p2 = divergence["points"]
-        price_color = "#0f766e" if divergence["type"] == "bullish" else "#b42318"
-        fig.add_trace(go.Scatter(x=[p1[0], p2[0]], y=[p1[1], p2[1]], mode="lines+markers", name="Price divergence", line=dict(color=price_color, width=2.0)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=[p1[0], p2[0]], y=[p1[2], p2[2]], mode="lines+markers", name="CVD divergence", line=dict(color=price_color, width=2.0, dash="dot")), row=2, col=1)
-    fig.add_hline(y=0, line_color="#64748b", line_width=1, line_dash="dot", row=2, col=1)
-    return apply_figure_style(fig, title="Cumulative Volume Delta Divergence", height=840)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Trend_Baseline"], name="21D baseline", line=dict(color="#111827", width=1.7)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["ADX"], name="ADX", line=dict(color="#7c3aed", width=2.4)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Plus_DI"], name="+DI", line=dict(color="#0f766e", width=1.8)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=view.index, y=view["Minus_DI"], name="-DI", line=dict(color="#b42318", width=1.8)), row=2, col=1)
+    fig.add_hline(y=25, line_color="#64748b", line_dash="dot", row=2, col=1)
+    fig.add_hline(y=20, line_color="#cbd5e1", line_dash="dot", row=2, col=1)
+    return apply_figure_style(fig, title="ADX / DMI Trend Strength", height=840)
 
 
 def get_probability(series: pd.Series, window: int, inverse: bool = False) -> pd.Series:
@@ -2303,6 +2383,81 @@ def format_pct(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.2f}%"
 
 
+def format_hit_rate(value: float) -> str:
+    return "n/a" if np.isnan(value) else f"{value:.0%}"
+
+
+def evaluate_signal_performance(
+    df: pd.DataFrame,
+    signal_col: str,
+    close_col: str = "Close",
+    lookback_bars: int = 756,
+) -> dict[str, Any]:
+    required = [signal_col, close_col]
+    if df is None or df.empty or any(col not in df.columns for col in required):
+        return {"signal_count": 0, "active_signal": 0, "persistence_days": 0, "windows": {}}
+
+    windows = [5, 10, 20]
+    view = df[required].copy().tail(lookback_bars + max(windows) + 5)
+    view[signal_col] = pd.to_numeric(view[signal_col], errors="coerce").fillna(0).astype(int)
+    view[close_col] = pd.to_numeric(view[close_col], errors="coerce")
+    signal = view[signal_col]
+    entry_signal = signal.where((signal != 0) & (signal != signal.shift(1).fillna(0)), 0)
+
+    current_signal = int(signal.iloc[-1]) if not signal.empty else 0
+    persistence_days = 0
+    if current_signal != 0:
+        for value in signal.iloc[::-1]:
+            if int(value) != current_signal:
+                break
+            persistence_days += 1
+
+    performance_windows: dict[int, dict[str, float]] = {}
+    for window in windows:
+        future_return = view[close_col].shift(-window) / view[close_col] - 1
+        mask = entry_signal != 0
+        signed_forward = future_return[mask] * entry_signal[mask]
+        performance_windows[window] = {
+            "hit_rate": float((signed_forward > 0).mean()) if not signed_forward.dropna().empty else np.nan,
+            "avg_return": float(signed_forward.mean()) if not signed_forward.dropna().empty else np.nan,
+        }
+
+    return {
+        "signal_count": int((entry_signal != 0).sum()),
+        "active_signal": current_signal,
+        "persistence_days": persistence_days,
+        "windows": performance_windows,
+    }
+
+
+def render_signal_scorecard(title: str, performance: dict[str, Any], active_label: str, tone: str) -> None:
+    st.markdown(f"#### {title}")
+    cards = st.columns(4)
+    with cards[0]:
+        render_metric_card("Signal Count", str(performance.get("signal_count", 0)), "Trailing 3y entry events", "neutral")
+    with cards[1]:
+        streak_value = f"{performance.get('persistence_days', 0)} bars"
+        render_metric_card("Active Streak", streak_value, active_label, tone)
+    with cards[2]:
+        hit_5d = performance.get("windows", {}).get(5, {})
+        render_metric_card("5D Hit Rate", format_hit_rate(hit_5d.get("hit_rate", np.nan)), f"Avg {format_pct(hit_5d.get('avg_return', np.nan))}", tone)
+    with cards[3]:
+        hit_20d = performance.get("windows", {}).get(20, {})
+        render_metric_card("20D Hit Rate", format_hit_rate(hit_20d.get("hit_rate", np.nan)), f"Avg {format_pct(hit_20d.get('avg_return', np.nan))}", tone)
+
+    scorecard_df = pd.DataFrame(
+        [
+            {
+                "Forward Window": f"{window}D",
+                "Hit Rate": format_hit_rate(values.get("hit_rate", np.nan)),
+                "Average Forward Return": format_pct(values.get("avg_return", np.nan)),
+            }
+            for window, values in performance.get("windows", {}).items()
+        ]
+    )
+    st.dataframe(scorecard_df, use_container_width=True, hide_index=True)
+
+
 def render_header(
     summary: DashboardSummary,
     active_view: str,
@@ -2311,9 +2466,9 @@ def render_header(
     supertrend_data: pd.DataFrame | None,
     vix_fix_data: pd.DataFrame | None,
     squeeze_data: pd.DataFrame | None,
-    nadaraya_data: pd.DataFrame | None,
-    lorentzian_data: pd.DataFrame | None,
-    cvd_data: dict[str, Any] | None,
+    absolute_momentum_data: pd.DataFrame | None,
+    donchian_data: pd.DataFrame | None,
+    adx_data: pd.DataFrame | None,
     canary_data: dict[str, Any] | None,
 ) -> None:
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -2326,9 +2481,9 @@ def render_header(
         "SuperTrend": (supertrend_signal_label(supertrend_data)[0], "ATR band flips and live regime line."),
         "Williams Vix Fix": (vix_fix_signal_label(vix_fix_data)[0], "Panic/complacency spikes versus recent extremes."),
         "Squeeze Momentum": (squeeze_signal_label(squeeze_data)[0], "Bollinger versus Keltner compression state."),
-        "Nadaraya-Watson": (nadaraya_signal_label(nadaraya_data)[0], "Kernel regression trend and adaptive envelope."),
-        "Lorentzian Classification": (lorentzian_signal_label(lorentzian_data)[0], "Nearest-neighbor style regime classification."),
-        "CVD Divergence": (cvd_signal_label(cvd_data)[0], "Price swing versus cumulative delta disagreement."),
+        "Absolute Momentum": (absolute_momentum_signal_label(absolute_momentum_data)[0], "Weighted 1/3/6/12M momentum normalized by realized volatility."),
+        "Donchian ATR Breakout": (donchian_signal_label(donchian_data)[0], "55D breakout filtered by persistence and ATR trailing stops."),
+        "ADX/DMI Trend Strength": (adx_signal_label(adx_data)[0], "Wilder trend strength and directional dominance."),
         "Canary Momentum": (canary_signal_label(canary_data)[0], "Dual-speed canary regime and rotation ranking."),
         "Market Pulse": (market_data["status"][0] if market_data else "Not loaded", "Cross-asset risk appetite backdrop."),
         "Options Flow": (options_signal_label(options_data)[0], f"SPX max pain {options_data['max_pain']:.2f}" if options_data else "SPX options unavailable"),
@@ -2347,12 +2502,12 @@ def render_header(
         active_tone = vix_fix_signal_label(vix_fix_data)[1]
     elif active_view == "Squeeze Momentum":
         active_tone = squeeze_signal_label(squeeze_data)[1]
-    elif active_view == "Nadaraya-Watson":
-        active_tone = nadaraya_signal_label(nadaraya_data)[1]
-    elif active_view == "Lorentzian Classification":
-        active_tone = lorentzian_signal_label(lorentzian_data)[1]
-    elif active_view == "CVD Divergence":
-        active_tone = cvd_signal_label(cvd_data)[1]
+    elif active_view == "Absolute Momentum":
+        active_tone = absolute_momentum_signal_label(absolute_momentum_data)[1]
+    elif active_view == "Donchian ATR Breakout":
+        active_tone = donchian_signal_label(donchian_data)[1]
+    elif active_view == "ADX/DMI Trend Strength":
+        active_tone = adx_signal_label(adx_data)[1]
     elif active_view == "Canary Momentum":
         active_tone = canary_signal_label(canary_data)[1]
     elif active_view == "Market Pulse" and market_data:
@@ -2535,9 +2690,9 @@ def main() -> None:
     need_supertrend = active_view == "SuperTrend"
     need_vix_fix = active_view == "Williams Vix Fix"
     need_squeeze = active_view == "Squeeze Momentum"
-    need_nadaraya = active_view == "Nadaraya-Watson"
-    need_lorentzian = active_view == "Lorentzian Classification"
-    need_cvd = active_view == "CVD Divergence"
+    need_absolute_momentum = active_view == "Absolute Momentum"
+    need_donchian = active_view == "Donchian ATR Breakout"
+    need_adx = active_view == "ADX/DMI Trend Strength"
     need_canary = active_view == "Canary Momentum"
     need_market = active_view == "Market Pulse"
     need_options = active_view == "Options Flow"
@@ -2555,15 +2710,15 @@ def main() -> None:
         supertrend_data = compute_supertrend(price_df) if need_supertrend else None
         vix_fix_data = compute_williams_vix_fix(price_df) if need_vix_fix else None
         squeeze_data = compute_squeeze_momentum(price_df) if need_squeeze else None
-        nadaraya_data = compute_nadaraya_watson(price_df) if need_nadaraya else None
-        lorentzian_data = compute_lorentzian_classification(price_df) if need_lorentzian else None
-        cvd_data = compute_cvd_divergence(price_df) if need_cvd else None
+        absolute_momentum_data = compute_absolute_momentum(price_df) if need_absolute_momentum else None
+        donchian_data = compute_donchian_breakout(price_df) if need_donchian else None
+        adx_data = compute_adx_trend_strength(price_df) if need_adx else None
         canary_data = compute_canary_momentum_dashboard(period=LOOKBACK_PERIOD) if need_canary else None
         market_data = compute_market_fear_greed() if need_market else None
         options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
 
     summary = build_summary(ticker, price_df, elder_df, td_df, stl_df, market_data, options_data)
-    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, nadaraya_data, lorentzian_data, cvd_data, canary_data)
+    render_header(summary, active_view, market_data, options_data, supertrend_data, vix_fix_data, squeeze_data, absolute_momentum_data, donchian_data, adx_data, canary_data)
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     active_view_label = display_view_name(active_view)
     st.markdown(
@@ -2572,29 +2727,35 @@ def main() -> None:
     )
 
     if active_view == "Elder Impulse":
-        st.plotly_chart(build_elder_figure(elder_df), use_container_width=True)
+        render_plotly_chart(build_elder_figure(elder_df))
     elif active_view == "TD Sequential":
-        st.plotly_chart(build_td_figure(td_df), use_container_width=True)
+        render_plotly_chart(build_td_figure(td_df))
     elif active_view == "Robust STL":
         if stl_df is None or stl_df.dropna(subset=["Trend", "Cycle_Score"]).empty:
             st.info("Robust STL could not build a valid cycle series for this ticker after trying both FinanceDataReader and Yahoo Finance.")
         else:
-            st.plotly_chart(build_stl_figure(stl_df), use_container_width=True)
+            render_plotly_chart(build_stl_figure(stl_df))
             st.caption(f"STL source: {stl_source} via `{stl_symbol}`")
     elif active_view == "SMC":
-        st.plotly_chart(build_smc_figure(smc_data), use_container_width=True)
+        render_plotly_chart(build_smc_figure(smc_data))
     elif active_view == "SuperTrend":
-        st.plotly_chart(build_supertrend_figure(supertrend_data), use_container_width=True)
+        render_plotly_chart(build_supertrend_figure(supertrend_data))
     elif active_view == "Williams Vix Fix":
-        st.plotly_chart(build_vix_fix_figure(vix_fix_data), use_container_width=True)
+        render_plotly_chart(build_vix_fix_figure(vix_fix_data))
     elif active_view == "Squeeze Momentum":
-        st.plotly_chart(build_squeeze_figure(squeeze_data), use_container_width=True)
-    elif active_view == "Nadaraya-Watson":
-        st.plotly_chart(build_nadaraya_figure(nadaraya_data), use_container_width=True)
-    elif active_view == "Lorentzian Classification":
-        st.plotly_chart(build_lorentzian_figure(lorentzian_data), use_container_width=True)
-    elif active_view == "CVD Divergence":
-        st.plotly_chart(build_cvd_figure(cvd_data), use_container_width=True)
+        render_plotly_chart(build_squeeze_figure(squeeze_data))
+    elif active_view == "Absolute Momentum":
+        momentum_label, momentum_tone = absolute_momentum_signal_label(absolute_momentum_data)
+        render_plotly_chart(build_absolute_momentum_figure(absolute_momentum_data))
+        render_signal_scorecard("Momentum Scorecard", evaluate_signal_performance(absolute_momentum_data, "Signal"), momentum_label, momentum_tone)
+    elif active_view == "Donchian ATR Breakout":
+        donchian_label, donchian_tone = donchian_signal_label(donchian_data)
+        render_plotly_chart(build_donchian_figure(donchian_data))
+        render_signal_scorecard("Breakout Scorecard", evaluate_signal_performance(donchian_data, "Signal"), donchian_label, donchian_tone)
+    elif active_view == "ADX/DMI Trend Strength":
+        adx_label, adx_tone = adx_signal_label(adx_data)
+        render_plotly_chart(build_adx_figure(adx_data))
+        render_signal_scorecard("Trend Strength Scorecard", evaluate_signal_performance(adx_data, "Signal"), adx_label, adx_tone)
     elif active_view == "Canary Momentum":
         if not canary_data:
             st.info("Canary momentum data could not be loaded from Yahoo Finance for the required universe.")
@@ -2604,7 +2765,7 @@ def main() -> None:
         if not market_data:
             st.info("Fear & Greed data could not be loaded from Yahoo Finance for the required macro basket.")
         else:
-            st.plotly_chart(build_market_figure(market_data), use_container_width=True)
+            render_plotly_chart(build_market_figure(market_data))
     elif active_view == "Options Flow":
         if not options_data:
             st.info("SPX option data could not be loaded from the CBOE delayed quotes feed.")
@@ -2618,7 +2779,7 @@ def main() -> None:
                 render_metric_card("Max Pain", f"{options_data['max_pain']:.2f}", "Strike with minimum aggregate pain", "neutral")
             with option_cards[3]:
                 render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e9:,.2f}B", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
-            st.plotly_chart(build_options_figure(options_data, options_data["spot"]), use_container_width=True)
+            render_plotly_chart(build_options_figure(options_data, options_data["spot"]))
 
     st.caption("Data sources: Yahoo Finance, FinanceDataReader, CBOE delayed quotes. Options analytics depend on listed option availability and delayed data quality.")
 
