@@ -278,4 +278,4 @@ Quick Access에는 아래 4개가 들어 있습니다.
 
 ## 10. 실행 파일
 
-메인 앱 파일은 [Project1.py](t:/Project/Project1.py) 입니다.
+메인 앱 파일은 [app.py] 입니다.
