@@ -42,7 +42,7 @@ CORE_DASHBOARD_VIEWS = [
 SPECIAL_ACTION_BUTTONS = [
     {"label": "Fear & Greed", "view": "Market Pulse", "caption": "Cross-asset risk appetite"},
     {"label": "Canary", "view": "Canary Momentum", "caption": "Risk-on/off rotation"},
-    {"label": "Option Gamma", "view": "Options Flow", "caption": "SPX dealer positioning"},
+    {"label": "Option", "view": "Options Flow", "caption": "SPX dealer positioning"},
 ]
 SPECIAL_ACTION_LABELS = {item["view"]: item["label"] for item in SPECIAL_ACTION_BUTTONS}
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
