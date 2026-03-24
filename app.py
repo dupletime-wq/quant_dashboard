@@ -42,7 +42,7 @@ CORE_DASHBOARD_VIEWS = [
 SPECIAL_ACTION_BUTTONS = [
     {"label": "Fear & Greed", "view": "Market Pulse", "caption": "Cross-asset risk appetite"},
     {"label": "Canary", "view": "Canary Momentum", "caption": "Risk-on/off rotation"},
-    {"label": "Option", "view": "Options Flow", "caption": "SPX dealer positioning"},
+    {"label": "Option Gamma", "view": "Options Flow", "caption": "SPX dealer positioning"},
 ]
 SPECIAL_ACTION_LABELS = {item["view"]: item["label"] for item in SPECIAL_ACTION_BUTTONS}
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
@@ -228,33 +228,34 @@ def apply_custom_style() -> None:
             border: 1px solid rgba(148, 163, 184, 0.16);
         }
         .sidebar-section-card {
-            margin: 0.35rem 0 0.75rem;
-            padding: 0.95rem 1rem 0.9rem;
-            border-radius: 20px;
-            background: linear-gradient(160deg, rgba(15, 23, 42, 0.94), rgba(15, 118, 110, 0.9));
-            box-shadow: 0 18px 34px rgba(15, 23, 42, 0.14);
-            color: #fffdf8;
+            margin: 0.3rem 0 0.7rem;
+            padding: 0.85rem 0.95rem;
+            border-radius: 18px;
+            background: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(240, 249, 255, 0.92));
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+            color: var(--page-ink);
         }
         .sidebar-section-eyebrow {
             font-size: 0.72rem;
             letter-spacing: 0.12em;
             text-transform: uppercase;
             font-weight: 800;
-            color: rgba(255, 250, 242, 0.72);
+            color: #0f766e;
         }
         .sidebar-section-title {
-            margin-top: 0.38rem;
-            font-size: 1.05rem;
+            margin-top: 0.26rem;
+            font-size: 0.98rem;
             font-weight: 800;
             letter-spacing: -0.02em;
         }
         .sidebar-section-copy {
-            margin-top: 0.32rem;
-            font-size: 0.9rem;
-            line-height: 1.5;
-            color: rgba(255, 250, 242, 0.88);
+            margin-top: 0.24rem;
+            font-size: 0.84rem;
+            line-height: 1.45;
+            color: var(--muted-ink);
         }
-        div[data-testid="stSidebar"] div[data-testid="column"] button[kind="secondary"] {
+        div[data-testid="stSidebar"] button[kind="secondary"] {
             min-height: 3.25rem;
             border-radius: 18px;
             border: 1px solid rgba(15, 23, 42, 0.1);
@@ -265,22 +266,23 @@ def apply_custom_style() -> None:
             box-shadow: 0 12px 22px rgba(15, 23, 42, 0.07);
             transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
         }
-        div[data-testid="stSidebar"] div[data-testid="column"] button[kind="secondary"]:hover {
+        div[data-testid="stSidebar"] button[kind="secondary"]:hover {
             border-color: rgba(15, 118, 110, 0.38);
             transform: translateY(-1px);
             box-shadow: 0 16px 28px rgba(15, 23, 42, 0.11);
         }
-        div[data-testid="stSidebar"] div[data-testid="column"] button[kind="secondary"]:focus {
+        div[data-testid="stSidebar"] button[kind="secondary"]:focus {
             border-color: rgba(15, 118, 110, 0.52);
             box-shadow: 0 0 0 0.18rem rgba(15, 118, 110, 0.12);
         }
-        .quick-action-caption {
-            margin-top: 0.3rem;
-            margin-bottom: 0.2rem;
-            text-align: center;
+        .quick-action-row-copy {
+            min-height: 3.25rem;
+            display: flex;
+            align-items: center;
+            padding: 0 0.15rem 0 0.55rem;
             color: var(--muted-ink);
-            font-size: 0.77rem;
-            line-height: 1.35;
+            font-size: 0.8rem;
+            line-height: 1.4;
         }
         </style>
         """,
@@ -2414,13 +2416,14 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         """,
         unsafe_allow_html=True,
     )
-    quick_action_cols = st.sidebar.columns(3)
     clicked_special_view = None
-    for column, action in zip(quick_action_cols, SPECIAL_ACTION_BUTTONS):
-        with column:
+    for action in SPECIAL_ACTION_BUTTONS:
+        button_col, text_col = st.sidebar.columns([1.15, 1.0], gap="small")
+        with button_col:
             if st.button(action["label"], key=f"special_action_{action['view']}", use_container_width=True):
                 clicked_special_view = action["view"]
-            st.markdown(f'<div class="quick-action-caption">{action["caption"]}</div>', unsafe_allow_html=True)
+        with text_col:
+            st.markdown(f'<div class="quick-action-row-copy">{action["caption"]}</div>', unsafe_allow_html=True)
     force_refresh = st.sidebar.checkbox("Force refresh cached data", value=False, key="force_refresh_toggle")
     if force_refresh:
         st.cache_data.clear()
