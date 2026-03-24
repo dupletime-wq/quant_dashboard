@@ -37,10 +37,9 @@ CORE_DASHBOARD_VIEWS = [
     "Squeeze Momentum",
     "Nadaraya-Watson",
     "Lorentzian Classification",
-    "CVD Divergence",
-    "Canary Momentum",
+    "CVD Divergence"
 ]
-SPECIAL_ACTION_VIEWS = ["Market Pulse", "Canary Momentum", "Options Flow"]
+SPECIAL_ACTION_VIEWS = ["Fear and Greed", "Canary", "Option Gamma"]
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 
 
