@@ -7,4 +7,5 @@ yfinance>=0.2.54
 scipy>=1.13
 statsmodels>=0.14
 finance-datareader>=0.9.96
-pandas_datareader
+setuptools>=68
+pandas-datareader==0.10.0
