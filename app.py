@@ -43,9 +43,32 @@ SPECIAL_ACTION_BUTTONS = [
     {"label": "Canary", "view": "Canary Momentum", "caption": "Risk-on/off rotation"},
     {"label": "Option Gamma", "view": "Options Flow", "caption": "SPX dealer positioning"},
     {"label": "ETF Sortino", "view": "ETF Sortino Leadership", "caption": "ETF leadership and sector risk"},
+    {"label": "Fed Watch", "view": "Fed Watch", "caption": "Fed/Treasury liquidity plumbing"},
 ]
 SPECIAL_ACTION_LABELS = {item["view"]: item["label"] for item in SPECIAL_ACTION_BUTTONS}
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
+FED_WATCH_PERIOD_OFFSETS = {
+    "1y": pd.DateOffset(years=1),
+    "2y": pd.DateOffset(years=2),
+    "3y": pd.DateOffset(years=3),
+    "5y": pd.DateOffset(years=5),
+}
+FED_WATCH_SERIES_SPECS = {
+    "SOFR": {"fred": "SOFR", "scale": 1.0, "unit": "pct"},
+    "IORB": {"fred": "IORB", "scale": 1.0, "unit": "pct"},
+    "IOER": {"fred": "IOER", "scale": 1.0, "unit": "pct"},
+    "RRP_Rate": {"fred": "RRPONTSYAWARD", "scale": 1.0, "unit": "pct"},
+    "US10Y": {"fred": "DGS10", "scale": 1.0, "unit": "pct"},
+    "US3M": {"fred": "DGS3MO", "scale": 1.0, "unit": "pct"},
+    "FED_Treasuries": {"fred": "WSHOTSL", "scale": 0.001, "unit": "billions"},
+    "Bank_Treasuries": {"fred": "USGSEC", "scale": 1.0, "unit": "billions"},
+    "SOFR_Vol": {"fred": "SOFRVOL", "scale": 1.0, "unit": "billions"},
+    "WALCL": {"fred": "WALCL", "scale": 0.001, "unit": "billions"},
+    "TGA": {"fred": "WTREGEN", "scale": 0.001, "unit": "billions"},
+    "Reserves": {"fred": "WRESBAL", "scale": 0.001, "unit": "billions"},
+    "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
+}
+FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
 
 
 @dataclass
@@ -475,11 +498,179 @@ def get_or_refresh_daily_payload(name: str, fetcher: Any) -> Any:
 
 
 def clear_daily_payload_cache(*names: str) -> None:
-    target_names = names or ("market_pulse", "spx_options_payload")
+    target_names = names or ("market_pulse", "spx_options_payload", *FED_WATCH_CACHE_KEYS)
     for name in target_names:
         cache_path = _daily_cache_path(name)
         if cache_path.exists():
             cache_path.unlink()
+
+
+def history_window_start(period: str) -> pd.Timestamp:
+    offset = FED_WATCH_PERIOD_OFFSETS.get(period, FED_WATCH_PERIOD_OFFSETS["3y"])
+    return (pd.Timestamp.now().normalize() - offset).normalize()
+
+
+def _fred_series_url(series_id: str) -> str:
+    return f"https://fred.stlouisfed.org/series/{series_id}"
+
+
+def _download_fred_csv_series(
+    series_id: str,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.Series:
+    from io import StringIO
+
+    response = requests.get(
+        "https://fred.stlouisfed.org/graph/fredgraph.csv",
+        params={
+            "id": series_id,
+            "cosd": start.strftime("%Y-%m-%d"),
+            "coed": end.strftime("%Y-%m-%d"),
+        },
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    frame = pd.read_csv(StringIO(response.text))
+    if "DATE" not in frame.columns or series_id not in frame.columns:
+        return pd.Series(dtype=float, name=series_id)
+
+    index = pd.to_datetime(frame["DATE"], errors="coerce")
+    values = pd.to_numeric(frame[series_id].replace(".", np.nan), errors="coerce")
+    series = pd.Series(values.values, index=index, name=series_id)
+    series = series.dropna()
+    if series.empty:
+        return series
+    series.index = normalize_datetime_index(series.index)
+    return series.sort_index()
+
+
+def _latest_series_date(series: pd.Series) -> pd.Timestamp | None:
+    clean = series.dropna()
+    if clean.empty:
+        return None
+    return pd.Timestamp(clean.index[-1])
+
+
+def _series_delta(series: pd.Series, periods: int = 20) -> float:
+    clean = series.dropna()
+    if len(clean) <= periods:
+        return np.nan
+    return float(clean.iloc[-1] - clean.iloc[-periods - 1])
+
+
+def _latest_frame_value(frame: pd.DataFrame, column: str) -> float:
+    if column not in frame.columns:
+        return np.nan
+    clean = frame[column].dropna()
+    if clean.empty:
+        return np.nan
+    return float(clean.iloc[-1])
+
+
+def _format_asof_date(timestamp: pd.Timestamp | None) -> str:
+    return "n/a" if timestamp is None or pd.isna(timestamp) else pd.Timestamp(timestamp).strftime("%Y-%m-%d")
+
+
+def _composite_latest_date(latest_dates: dict[str, pd.Timestamp], keys: list[str]) -> pd.Timestamp | None:
+    dates = [latest_dates[key] for key in keys if key in latest_dates and latest_dates[key] is not None]
+    if not dates:
+        return None
+    return min(dates)
+
+
+def _build_fed_watch_payload(period: str) -> dict[str, Any] | None:
+    start = history_window_start(period)
+    end = pd.Timestamp.now().normalize()
+    daily_index = pd.date_range(start=start, end=end, freq="D")
+
+    frame = pd.DataFrame(index=daily_index)
+    source_status: list[dict[str, Any]] = []
+    warnings_list: list[str] = []
+    latest_dates: dict[str, pd.Timestamp] = {}
+    raw_series: dict[str, pd.Series] = {}
+
+    for alias, spec in FED_WATCH_SERIES_SPECS.items():
+        series_id = str(spec["fred"])
+        try:
+            raw = _download_fred_csv_series(series_id, start=start, end=end)
+            scaled = raw * float(spec["scale"])
+            scaled.name = alias
+            raw_series[alias] = scaled
+            latest_date = _latest_series_date(scaled)
+            if latest_date is not None:
+                latest_dates[alias] = latest_date
+            aligned = scaled.reindex(daily_index).ffill()
+            if alias == "IOER" and latest_date is not None:
+                aligned.loc[aligned.index > latest_date] = np.nan
+            frame[alias] = aligned
+            source_status.append(
+                {
+                    "Series": alias,
+                    "FRED Code": series_id,
+                    "Rows": int(scaled.dropna().shape[0]),
+                    "Latest": latest_date.strftime("%Y-%m-%d") if latest_date is not None else "n/a",
+                    "Unit": str(spec["unit"]),
+                    "Status": "OK" if not scaled.dropna().empty else "Empty",
+                    "URL": _fred_series_url(series_id),
+                }
+            )
+            if scaled.dropna().empty:
+                warnings_list.append(f"{alias} ({series_id}) returned no usable rows.")
+        except Exception as exc:
+            frame[alias] = np.nan
+            warnings_list.append(f"{alias} ({series_id}) failed to load: {exc}")
+            source_status.append(
+                {
+                    "Series": alias,
+                    "FRED Code": series_id,
+                    "Rows": 0,
+                    "Latest": "n/a",
+                    "Unit": str(spec["unit"]),
+                    "Status": "Failed",
+                    "URL": _fred_series_url(series_id),
+                }
+            )
+
+    if frame.dropna(how="all").empty:
+        return None
+
+    frame["IORB_Combined"] = frame["IORB"].combine_first(frame["IOER"])
+    frame["Stress_SOFR_IORB"] = frame["SOFR"] - frame["IORB_Combined"]
+    frame["Spread_Carry"] = frame["US10Y"] - frame["SOFR"]
+    frame["Spread_Curve"] = frame["US10Y"] - frame["US3M"]
+    frame["Net_Liquidity"] = frame["WALCL"] - frame["TGA"] - frame["ON_RRP"]
+    frame = frame.sort_index()
+    policy_rate_date = max(
+        [latest_dates[key] for key in ["IORB", "IOER"] if key in latest_dates and latest_dates[key] is not None],
+        default=None,
+    )
+    spread_date_candidates = [value for value in [latest_dates.get("SOFR"), policy_rate_date] if value is not None]
+
+    card_dates = {
+        "Net_Liquidity": _composite_latest_date(latest_dates, ["WALCL", "TGA", "ON_RRP"]),
+        "Spread": min(spread_date_candidates) if spread_date_candidates else None,
+        "TGA": latest_dates.get("TGA"),
+        "ON_RRP": latest_dates.get("ON_RRP"),
+    }
+
+    return {
+        "period": period,
+        "frame": frame,
+        "raw_series": raw_series,
+        "latest_dates": latest_dates,
+        "card_dates": card_dates,
+        "source_status": pd.DataFrame(source_status),
+        "warnings": warnings_list,
+    }
+
+
+def fetch_fed_watch_data(period: str) -> dict[str, Any] | None:
+    cache_period = period if period in FED_WATCH_PERIOD_OFFSETS else "3y"
+    return get_or_refresh_daily_payload(f"fed_watch_{cache_period}", lambda: _build_fed_watch_payload(cache_period))
 
 
 def get_yfinance_candidates(ticker: str) -> list[str]:
@@ -1857,6 +2048,274 @@ def build_market_figure(market_data: dict[str, Any]) -> go.Figure:
     return apply_figure_style(fig, title="Macro Fear and Greed Dashboard", height=840, legend_y=1.08)
 
 
+def _frame_has_data(frame: pd.DataFrame, column: str) -> bool:
+    return column in frame.columns and not frame[column].dropna().empty
+
+
+def render_fed_watch_header(fed_watch_data: dict[str, Any]) -> None:
+    frame = fed_watch_data["frame"]
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    period_label = str(fed_watch_data["period"]).upper()
+    net_liquidity_value = _latest_frame_value(frame, "Net_Liquidity")
+    tga_value = _latest_frame_value(frame, "TGA")
+    on_rrp_value = _latest_frame_value(frame, "ON_RRP")
+    stress_value = _latest_frame_value(frame, "Stress_SOFR_IORB")
+
+    net_liquidity_delta = _series_delta(frame["Net_Liquidity"]) if _frame_has_data(frame, "Net_Liquidity") else np.nan
+    tga_delta = _series_delta(frame["TGA"]) if _frame_has_data(frame, "TGA") else np.nan
+    on_rrp_delta = _series_delta(frame["ON_RRP"]) if _frame_has_data(frame, "ON_RRP") else np.nan
+
+    st.markdown(
+        f"""
+        <div class="hero">
+            <h1>Fed Watch · Liquidity Plumbing</h1>
+            <p>
+                FRED-based macro quick view across the current {period_label} history window.
+                Net liquidity follows WALCL - TGA - ON RRP. Last refresh: {current_time}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cards = st.columns(4)
+    with cards[0]:
+        render_metric_card(
+            "Net Liquidity",
+            format_billions(net_liquidity_value),
+            f"WALCL - TGA - ON RRP, as of {_format_asof_date(fed_watch_data['card_dates'].get('Net_Liquidity'))}",
+            "bull" if not np.isnan(net_liquidity_delta) and net_liquidity_delta >= 0 else "bear" if not np.isnan(net_liquidity_delta) else "neutral",
+        )
+    with cards[1]:
+        render_metric_card(
+            "TGA",
+            format_billions(tga_value),
+            f"20D change {format_billions_change(tga_delta)} · as of {_format_asof_date(fed_watch_data['card_dates'].get('TGA'))}",
+            "bear" if not np.isnan(tga_delta) and tga_delta > 0 else "bull" if not np.isnan(tga_delta) else "neutral",
+        )
+    with cards[2]:
+        render_metric_card(
+            "ON RRP",
+            format_billions(on_rrp_value),
+            f"20D change {format_billions_change(on_rrp_delta)} · as of {_format_asof_date(fed_watch_data['card_dates'].get('ON_RRP'))}",
+            "bull" if not np.isnan(on_rrp_delta) and on_rrp_delta <= 0 else "accent" if not np.isnan(on_rrp_delta) else "neutral",
+        )
+    with cards[3]:
+        render_metric_card(
+            "SOFR - IORB",
+            format_bps(stress_value),
+            f"Plumbing stress spread, as of {_format_asof_date(fed_watch_data['card_dates'].get('Spread'))}",
+            "bear" if not np.isnan(stress_value) and stress_value > 0 else "bull" if not np.isnan(stress_value) else "neutral",
+        )
+
+
+def build_fed_watch_figure(fed_watch_data: dict[str, Any]) -> go.Figure:
+    frame = fed_watch_data["frame"].copy()
+    subset = [column for column in ["SOFR", "IORB_Combined", "WALCL", "TGA", "ON_RRP"] if column in frame.columns]
+    if subset:
+        frame = frame.dropna(how="all", subset=subset)
+    if frame.empty:
+        frame = fed_watch_data["frame"].copy()
+
+    fig = make_subplots(
+        rows=3,
+        cols=2,
+        specs=[[{}, {}], [{}, {}], [{"secondary_y": True}, {}]],
+        subplot_titles=(
+            "Collateral Supply: Fed vs Banks",
+            "Dealer Incentive: 10Y - SOFR",
+            "Plumbing Stress: SOFR vs IORB",
+            "Funding Volume: SOFR Volume",
+            "Treasury and Fed Drains",
+            "Traditional Curve: 10Y - 3M",
+        ),
+        vertical_spacing=0.1,
+        horizontal_spacing=0.08,
+    )
+
+    if _frame_has_data(frame, "FED_Treasuries"):
+        fig.add_trace(
+            go.Scatter(x=frame.index, y=frame["FED_Treasuries"], name="Fed Treasuries", line=dict(color="#b42318", width=2, dash="dash")),
+            row=1,
+            col=1,
+        )
+    if _frame_has_data(frame, "Bank_Treasuries"):
+        fig.add_trace(
+            go.Scatter(x=frame.index, y=frame["Bank_Treasuries"], name="Bank Treasuries", line=dict(color="#2563eb", width=2)),
+            row=1,
+            col=1,
+        )
+
+    if _frame_has_data(frame, "Spread_Carry"):
+        carry = frame["Spread_Carry"]
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=carry.where(carry >= 0),
+                mode="lines",
+                line=dict(color="rgba(15, 118, 110, 0)"),
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=np.zeros(len(frame)),
+                mode="lines",
+                line=dict(color="rgba(15, 118, 110, 0)"),
+                fill="tonexty",
+                fillcolor="rgba(15, 118, 110, 0.20)",
+                name="Positive carry",
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=carry.where(carry < 0),
+                mode="lines",
+                line=dict(color="rgba(180, 35, 24, 0)"),
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=np.zeros(len(frame)),
+                mode="lines",
+                line=dict(color="rgba(180, 35, 24, 0)"),
+                fill="tonexty",
+                fillcolor="rgba(180, 35, 24, 0.18)",
+                name="Negative carry",
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(x=frame.index, y=carry, name="10Y - SOFR", line=dict(color="#7f1d1d", width=2)),
+            row=1,
+            col=2,
+        )
+        fig.add_hline(y=0, line_color="#64748b", line_dash="dot", row=1, col=2)
+
+    if _frame_has_data(frame, "SOFR") and _frame_has_data(frame, "IORB_Combined"):
+        stress_mask = frame["SOFR"] > frame["IORB_Combined"]
+        if bool(stress_mask.fillna(False).any()):
+            fig.add_trace(
+                go.Scatter(
+                    x=frame.index,
+                    y=frame["IORB_Combined"].where(stress_mask),
+                    mode="lines",
+                    line=dict(color="rgba(180, 35, 24, 0)"),
+                    showlegend=False,
+                    hoverinfo="skip",
+                ),
+                row=2,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=frame.index,
+                    y=frame["SOFR"].where(stress_mask),
+                    mode="lines",
+                    line=dict(color="rgba(180, 35, 24, 0)"),
+                    fill="tonexty",
+                    fillcolor="rgba(180, 35, 24, 0.22)",
+                    name="Stress zone",
+                    hoverinfo="skip",
+                ),
+                row=2,
+                col=1,
+            )
+        fig.add_trace(go.Scatter(x=frame.index, y=frame["SOFR"], name="SOFR", line=dict(color="#111827", width=1.9)), row=2, col=1)
+        fig.add_trace(go.Scatter(x=frame.index, y=frame["IORB_Combined"], name="IORB / IOER", line=dict(color="#b42318", width=2, dash="dash")), row=2, col=1)
+
+    if _frame_has_data(frame, "SOFR_Vol"):
+        fig.add_trace(
+            go.Scatter(x=frame.index, y=frame["SOFR_Vol"], name="SOFR Volume", line=dict(color="#7c3aed", width=2)),
+            row=2,
+            col=2,
+        )
+
+    if _frame_has_data(frame, "TGA"):
+        fig.add_trace(go.Scatter(x=frame.index, y=frame["TGA"], name="TGA", line=dict(color="#dd6b20", width=2)), row=3, col=1, secondary_y=False)
+    if _frame_has_data(frame, "ON_RRP"):
+        fig.add_trace(go.Scatter(x=frame.index, y=frame["ON_RRP"], name="ON RRP", line=dict(color="#2563eb", width=2)), row=3, col=1, secondary_y=False)
+    if _frame_has_data(frame, "Reserves"):
+        fig.add_trace(
+            go.Scatter(x=frame.index, y=frame["Reserves"], name="Reserve Balances", line=dict(color="#0f766e", width=2, dash="dash")),
+            row=3,
+            col=1,
+            secondary_y=True,
+        )
+
+    if _frame_has_data(frame, "Spread_Curve"):
+        curve = frame["Spread_Curve"]
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=curve.where(curve < 0),
+                mode="lines",
+                line=dict(color="rgba(100, 116, 139, 0)"),
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=3,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=np.zeros(len(frame)),
+                mode="lines",
+                line=dict(color="rgba(100, 116, 139, 0)"),
+                fill="tonexty",
+                fillcolor="rgba(100, 116, 139, 0.18)",
+                name="Inverted curve",
+                hoverinfo="skip",
+            ),
+            row=3,
+            col=2,
+        )
+        fig.add_trace(go.Scatter(x=frame.index, y=curve, name="10Y - 3M", line=dict(color="#102a43", width=2)), row=3, col=2)
+        fig.add_hline(y=0, line_color="#b42318", line_dash="dot", row=3, col=2)
+
+    fig.update_yaxes(title_text="Billions USD", row=1, col=1)
+    fig.update_yaxes(title_text="Spread (%)", row=1, col=2)
+    fig.update_yaxes(title_text="Rate (%)", row=2, col=1)
+    fig.update_yaxes(title_text="Billions USD", row=2, col=2)
+    fig.update_yaxes(title_text="TGA / ON RRP (B)", row=3, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="Reserves (B)", row=3, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="Spread (%)", row=3, col=2)
+    fig.update_xaxes(tickformat="%Y-%m")
+    return apply_figure_style(fig, title="Fed Watch Liquidity Dashboard", height=1180, legend_y=1.03)
+
+
+def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
+    warnings_list = fed_watch_data.get("warnings", [])
+    if warnings_list:
+        st.info("Partial FRED coverage: " + " | ".join(warnings_list[:4]))
+
+    st.markdown(
+        '<div class="section-note">This view tracks collateral supply, funding stress, treasury cash drains, and a simple net-liquidity proxy using official FRED series. Values are normalized to billions of dollars where applicable.</div>',
+        unsafe_allow_html=True,
+    )
+    render_plotly_chart(build_fed_watch_figure(fed_watch_data))
+
+    with st.expander("Fed Watch diagnostics", expanded=False):
+        status_frame = fed_watch_data["source_status"].copy()
+        st.dataframe(status_frame, use_container_width=True, hide_index=True)
+
+
 def bs_greeks(S: float, K: float, T: float, r: float, q: float, sigma: float, option_type: str) -> dict[str, float]:
     if T <= 0.0001 or sigma <= 0.001 or S <= 0 or K <= 0:
         return {"gamma": 0.0, "vanna": 0.0, "charm": 0.0}
@@ -2616,6 +3075,18 @@ def tone_from_return(value: float) -> str:
     return "bull" if value >= 0 else "bear"
 
 
+def format_billions(value: float) -> str:
+    return "n/a" if np.isnan(value) else f"{value:,.0f}B"
+
+
+def format_billions_change(value: float) -> str:
+    return "n/a" if np.isnan(value) else f"{value:+,.0f}B"
+
+
+def format_bps(value: float) -> str:
+    return "n/a" if np.isnan(value) else f"{value * 100:+.1f} bps"
+
+
 def format_pct(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.2f}%"
 
@@ -2720,7 +3191,7 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         <div class="sidebar-section-card">
             <div class="sidebar-section-eyebrow">Quick Access</div>
             <div class="sidebar-section-title">Special dashboards</div>
-            <div class="sidebar-section-copy">Open cross-asset pulse, canary regime, SPX dealer gamma, or ETF leadership without touching the main chart picker.</div>
+            <div class="sidebar-section-copy">Open cross-asset pulse, canary regime, SPX dealer gamma, ETF leadership, or Fed/Treasury liquidity plumbing without touching the main chart picker.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2765,20 +3236,22 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         )
 
     selected_expiry = None
-    spx_payload = fetch_spx_options_payload()
-    spx_expiries = extract_spx_expiries(spx_payload)
-    if spx_expiries:
-        saved_expiry = st.session_state.get("selected_spx_expiry")
-        default_index = spx_expiries.index(saved_expiry) if saved_expiry in spx_expiries else 0
-        selected_expiry = st.sidebar.selectbox(
-            "SPX option expiry",
-            options=spx_expiries,
-            index=default_index,
-            key="selected_spx_expiry_select",
-        )
-        st.session_state["selected_spx_expiry"] = selected_expiry
-    else:
-        st.sidebar.caption("SPX option chain is temporarily unavailable.")
+    spx_payload = None
+    if active_view == "Options Flow":
+        spx_payload = fetch_spx_options_payload()
+        spx_expiries = extract_spx_expiries(spx_payload)
+        if spx_expiries:
+            saved_expiry = st.session_state.get("selected_spx_expiry")
+            default_index = spx_expiries.index(saved_expiry) if saved_expiry in spx_expiries else 0
+            selected_expiry = st.sidebar.selectbox(
+                "SPX option expiry",
+                options=spx_expiries,
+                index=default_index,
+                key="selected_spx_expiry_select",
+            )
+            st.session_state["selected_spx_expiry"] = selected_expiry
+        else:
+            st.sidebar.caption("SPX option chain is temporarily unavailable.")
     return active_ticker, active_period, active_view, selected_expiry, spx_payload, sortino_top_n
 
 def render_data_status(price_df: pd.DataFrame, price_source: str, price_symbol: str, stl_df: pd.DataFrame | None, stl_source: str, stl_symbol: str) -> None:
@@ -2840,6 +3313,21 @@ def main() -> None:
     apply_custom_style()
     ticker, period, active_view, selected_expiry, spx_payload, sortino_top_n = render_sidebar(default_ticker="NVDA")
 
+    if active_view == "Fed Watch":
+        with st.spinner("Loading Fed Watch data..."):
+            fed_watch_data = fetch_fed_watch_data(period)
+        if not fed_watch_data or fed_watch_data["frame"].dropna(how="all").empty:
+            st.error("Fed Watch could not load usable FRED data for the selected history window.")
+            st.stop()
+        render_fed_watch_header(fed_watch_data)
+        st.markdown(
+            '<div class="section-note">Active view: <strong>Fed Watch</strong>. This quick view runs independently from the ticker chart stack and uses the shared history window as its macro lookback.</div>',
+            unsafe_allow_html=True,
+        )
+        render_fed_watch_dashboard(fed_watch_data)
+        st.caption("Data sources: FRED series for SOFR, reserve balances, Treasury cash, reverse repo usage, Treasury yields, and bank/Fed Treasury holdings.")
+        return
+
     with st.spinner(f"Loading data for {ticker}..."):
         price_df, price_source, price_symbol = download_price_data(ticker, period=period)
     if price_df.empty:
@@ -2881,7 +3369,7 @@ def main() -> None:
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     active_view_label = display_view_name(active_view)
     st.markdown(
-        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators are selected from the chart picker, while Fear &amp; Greed, Canary, Option Gamma, and ETF Sortino run from the quick-access buttons.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators are selected from the chart picker, while Fear &amp; Greed, Canary, Option Gamma, ETF Sortino, and Fed Watch run from the quick-access buttons.</div>',
         unsafe_allow_html=True,
     )
 
@@ -2933,7 +3421,7 @@ def main() -> None:
         else:
             render_etf_sortino_dashboard(etf_sortino_data)
 
-    st.caption("Data sources: Yahoo Finance, FinanceDataReader, CBOE delayed quotes. ETF Sortino leadership depends on Yahoo ETF universe metadata, price history, and holdings coverage.")
+    st.caption("Data sources: Yahoo Finance, FinanceDataReader, CBOE delayed quotes, and FRED. ETF Sortino leadership depends on Yahoo ETF universe metadata, price history, and holdings coverage.")
 
 
 if __name__ == "__main__":
