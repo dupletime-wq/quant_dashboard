@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import pickle
 from pathlib import Path
 import re
-import time
 from typing import Any
 
 import FinanceDataReader as fdr
@@ -74,10 +72,6 @@ FED_WATCH_SERIES_SPECS = {
     "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
 }
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
-FED_WATCH_REQUEST_TIMEOUT = 15
-FED_WATCH_RETRY_TIMEOUTS = (8, 15, 25)
-FED_WATCH_RETRY_SLEEP_SECONDS = 0.75
-FED_WATCH_MAX_WORKERS = 2
 
 
 @dataclass
@@ -542,53 +536,6 @@ def _fred_series_url(series_id: str) -> str:
     return f"https://fred.stlouisfed.org/series/{series_id}"
 
 
-def _download_fred_csv_series(
-    series_id: str,
-    *,
-    start: pd.Timestamp,
-    end: pd.Timestamp,
-) -> pd.Series:
-    from io import StringIO
-
-    last_error: Exception | None = None
-    for attempt, timeout in enumerate(FED_WATCH_RETRY_TIMEOUTS, start=1):
-        try:
-            response = requests.get(
-                "https://fred.stlouisfed.org/graph/fredgraph.csv",
-                params={
-                    "id": series_id,
-                    "cosd": start.strftime("%Y-%m-%d"),
-                    "coed": end.strftime("%Y-%m-%d"),
-                },
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            break
-        except requests.RequestException as exc:
-            last_error = exc
-            if attempt == len(FED_WATCH_RETRY_TIMEOUTS):
-                raise
-            time.sleep(FED_WATCH_RETRY_SLEEP_SECONDS * attempt)
-    else:
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError(f"Failed to download FRED series: {series_id}")
-
-    frame = pd.read_csv(StringIO(response.text))
-    if "DATE" not in frame.columns or series_id not in frame.columns:
-        return pd.Series(dtype=float, name=series_id)
-
-    index = pd.to_datetime(frame["DATE"], errors="coerce")
-    values = pd.to_numeric(frame[series_id].replace(".", np.nan), errors="coerce")
-    series = pd.Series(values.values, index=index, name=series_id)
-    series = series.dropna()
-    if series.empty:
-        return series
-    series.index = normalize_datetime_index(series.index)
-    return series.sort_index()
-
-
 def _latest_series_date(series: pd.Series) -> pd.Timestamp | None:
     clean = series.dropna()
     if clean.empty:
@@ -638,14 +585,6 @@ def _normalize_fed_watch_series(
     if alias == "IOER" and latest_date is not None:
         aligned.loc[aligned.index > latest_date] = np.nan
     return clean, aligned, latest_date
-
-
-def _fetch_fed_watch_series(alias: str, spec: dict[str, Any], start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
-    series_id = str(spec["fred"])
-    raw = _download_fred_csv_series(series_id, start=start, end=end)
-    scaled = raw * float(spec["scale"])
-    scaled.name = alias
-    return scaled
 
 
 def _download_fred_batch_series(start: pd.Timestamp, end: pd.Timestamp) -> tuple[dict[str, pd.Series], str | None]:
@@ -718,30 +657,10 @@ def _build_fed_watch_payload(
     raw_series: dict[str, pd.Series] = {}
     stale_fallback_count = 0
     live_series: dict[str, pd.Series] = {}
-    live_errors: dict[str, str] = {}
     batch_series, batch_error = _download_fred_batch_series(start, end)
     live_series.update(batch_series)
-    if batch_error and not batch_series:
-        warnings_list.append(f"Batch FRED request failed, falling back to per-series download: {batch_error}")
-
-    missing_specs = {
-        alias: spec
-        for alias, spec in FED_WATCH_SERIES_SPECS.items()
-        if alias not in live_series
-    }
-    if missing_specs:
-        with ThreadPoolExecutor(max_workers=min(FED_WATCH_MAX_WORKERS, len(missing_specs))) as executor:
-            futures = {
-                executor.submit(_fetch_fed_watch_series, alias, spec, start, end): (alias, spec)
-                for alias, spec in missing_specs.items()
-            }
-            for future in as_completed(futures):
-                alias, spec = futures[future]
-                series_id = str(spec["fred"])
-                try:
-                    live_series[alias] = future.result()
-                except Exception as exc:
-                    live_errors[alias] = f"{alias} ({series_id}) failed to load: {exc}"
+    if batch_error:
+        warnings_list.append(f"Batch FRED request failed: {batch_error}")
 
     for alias, spec in FED_WATCH_SERIES_SPECS.items():
         series_id = str(spec["fred"])
@@ -763,14 +682,18 @@ def _build_fed_watch_payload(
                 source_label = f"Cache {cached_date}" if cached_date else "Stale cache"
                 status_label = "Stale fallback"
                 stale_fallback_count += 1
-                if alias in live_errors:
-                    warning_text = f"{live_errors[alias]} Using cached series from {cached_date or 'a previous run'}."
+                if batch_error:
+                    warning_text = f"{alias} ({series_id}) was unavailable from batch FRED download. Using cached series from {cached_date or 'a previous run'}."
                 else:
                     warning_text = f"{alias} ({series_id}) returned no usable live rows. Using cached series from {cached_date or 'a previous run'}."
             else:
                 frame[alias] = np.nan
-                status_label = "Failed" if alias in live_errors else "Empty"
-                warning_text = live_errors.get(alias, f"{alias} ({series_id}) returned no usable rows.")
+                status_label = "Failed" if batch_error else "Empty"
+                warning_text = (
+                    f"{alias} ({series_id}) failed to load from batch FRED download: {batch_error}"
+                    if batch_error
+                    else f"{alias} ({series_id}) returned no usable rows."
+                )
                 source_status.append(
                     {
                         "Series": alias,
