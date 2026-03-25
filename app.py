@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pickle
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 import FinanceDataReader as fdr
@@ -14,6 +15,13 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
+try:
+    from setuptools import _distutils as setuptools_distutils
+    sys.modules.setdefault("distutils", setuptools_distutils)
+    if hasattr(setuptools_distutils, "version"):
+        sys.modules.setdefault("distutils.version", setuptools_distutils.version)
+except Exception:
+    pass
 try:
     import pandas_datareader.data as pdr_web
     PDR_IMPORT_ERROR: str | None = None
