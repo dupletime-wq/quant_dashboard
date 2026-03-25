@@ -2156,7 +2156,7 @@ def build_market_figure(market_data: dict[str, Any]) -> go.Figure:
                     {"range": [80, 100], "color": "#fee2e2"},
                 ],
             },
-            title={"text": "Fear <-> Greed"},
+            title={"text": ""},
         ),
         row=1,
         col=1,
@@ -2170,7 +2170,20 @@ def build_market_figure(market_data: dict[str, Any]) -> go.Figure:
     fig.add_trace(go.Scatter(x=plot_df.index, y=[0.8] * len(plot_df), mode="lines", line=dict(color="#b42318", width=1, dash="dot"), showlegend=False), row=1, col=2)
     fig.add_trace(go.Scatter(x=plot_df.index, y=[0.2] * len(plot_df), mode="lines", line=dict(color="#0f766e", width=1, dash="dot"), showlegend=False), row=1, col=2)
     fig.add_trace(go.Scatter(x=plot_df.index, y=[0.5] * len(plot_df), mode="lines", line=dict(color="#64748b", width=1, dash="dot"), showlegend=False), row=2, col=2)
-    return apply_figure_style(fig, title="Macro Fear and Greed Dashboard", height=840, legend_y=1.08)
+    fig = apply_figure_style(fig, title="", height=840, legend_y=1.10)
+    fig.update_layout(
+        margin=dict(l=22, r=22, t=118, b=18),
+        legend=dict(
+            orientation="h",
+            y=1.10,
+            x=0,
+            font=dict(size=11),
+            itemwidth=72,
+            tracegroupgap=8,
+        ),
+    )
+    fig.update_annotations(font=dict(size=12))
+    return fig
 
 
 def _frame_has_data(frame: pd.DataFrame, column: str) -> bool:
