@@ -747,15 +747,14 @@ def _build_fed_watch_payload(
         if warning_text:
             warnings_list.append(warning_text)
 
-    if frame.dropna(how="all").empty:
-        return None
-
     frame["IORB_Combined"] = frame["IORB"].combine_first(frame["IOER"])
     frame["Stress_SOFR_IORB"] = frame["SOFR"] - frame["IORB_Combined"]
     frame["Spread_Carry"] = frame["US10Y"] - frame["SOFR"]
     frame["Spread_Curve"] = frame["US10Y"] - frame["US3M"]
     frame["Net_Liquidity"] = frame["WALCL"] - frame["TGA"] - frame["ON_RRP"]
     frame = frame.sort_index()
+    if frame.dropna(how="all").empty:
+        warnings_list.append("No usable live FRED rows were returned for this request window.")
     policy_rate_date = max(
         [latest_dates[key] for key in ["IORB", "IOER"] if key in latest_dates and latest_dates[key] is not None],
         default=None,
@@ -797,7 +796,12 @@ def fetch_fed_watch_data(period: str) -> dict[str, Any] | None:
 
     fresh_data = _build_fed_watch_payload(cache_period, cached_payload=cached_data, cached_date=cache_date)
     if fresh_data is not None:
-        save_daily_cached_payload(cache_name, fresh_data)
+        has_usable_rows = not fresh_data["frame"].dropna(how="all").empty
+        if has_usable_rows:
+            save_daily_cached_payload(cache_name, fresh_data)
+            return fresh_data
+        if cached_data is not None:
+            return cached_data
         return fresh_data
     return cached_data
 
@@ -2430,6 +2434,9 @@ def build_fed_watch_figure(fed_watch_data: dict[str, Any]) -> go.Figure:
 
 
 def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
+    if fed_watch_data["frame"].dropna(how="all").empty:
+        st.warning("FRED data is temporarily unavailable for this window. Diagnostics below show which series failed or timed out.")
+
     stale_fallback_count = int(fed_watch_data.get("stale_fallback_count", 0) or 0)
     if stale_fallback_count > 0:
         cache_date = fed_watch_data.get("stale_cache_date")
@@ -3472,7 +3479,7 @@ def main() -> None:
     if active_view == "Fed Watch":
         with st.spinner("Loading Fed Watch data..."):
             fed_watch_data = fetch_fed_watch_data(period)
-        if not fed_watch_data or fed_watch_data["frame"].dropna(how="all").empty:
+        if not fed_watch_data:
             st.error("Fed Watch could not load usable FRED data for the selected history window.")
             st.stop()
         render_fed_watch_header(fed_watch_data)
