@@ -2422,7 +2422,33 @@ def build_fed_watch_figure(fed_watch_data: dict[str, Any]) -> go.Figure:
     fig.update_yaxes(title_text="Reserves (B)", row=3, col=1, secondary_y=True)
     fig.update_yaxes(title_text="Spread (%)", row=3, col=2)
     fig.update_xaxes(tickformat="%Y-%m")
-    return apply_figure_style(fig, title="Fed Watch Liquidity Dashboard", height=1180, legend_y=1.03)
+
+    fig = apply_figure_style(fig, title="Fed Watch Liquidity Dashboard", height=1180, legend_y=1.12)
+    fig.update_layout(
+        margin=dict(l=22, r=22, t=138, b=18),
+        legend=dict(
+            orientation="h",
+            y=1.12,
+            x=0,
+            font=dict(size=11),
+            itemwidth=72,
+            tracegroupgap=8,
+        ),
+    )
+    fig.update_annotations(font=dict(size=12))
+    return fig
+
+
+def _fed_watch_display_warnings(fed_watch_data: dict[str, Any]) -> list[str]:
+    warnings_list = list(fed_watch_data.get("warnings", []))
+    frame = fed_watch_data.get("frame")
+    iorb_available = isinstance(frame, pd.DataFrame) and _frame_has_data(frame, "IORB")
+    filtered: list[str] = []
+    for warning in warnings_list:
+        if iorb_available and "IOER (IOER) returned no usable rows." in warning:
+            continue
+        filtered.append(warning)
+    return filtered
 
 
 def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
@@ -2435,9 +2461,15 @@ def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
         cache_text = f" from {cache_date}" if cache_date else ""
         st.info(f"Using stale cache for {stale_fallback_count} slow FRED series{cache_text}.")
 
-    warnings_list = fed_watch_data.get("warnings", [])
+    warnings_list = _fed_watch_display_warnings(fed_watch_data)
     if warnings_list:
         st.info("Partial FRED coverage: " + " | ".join(warnings_list[:4]))
+
+    frame = fed_watch_data.get("frame")
+    iorb_available = isinstance(frame, pd.DataFrame) and _frame_has_data(frame, "IORB")
+    ioer_available = isinstance(frame, pd.DataFrame) and _frame_has_data(frame, "IOER")
+    if iorb_available and not ioer_available:
+        st.caption("IOER is a legacy series. Current plumbing spread and dashboard cards continue to use IORB when it is available.")
 
     st.markdown(
         '<div class="section-note">This view tracks collateral supply, funding stress, treasury cash drains, and a simple net-liquidity proxy using official FRED series. Values are normalized to billions of dollars where applicable.</div>',
