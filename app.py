@@ -16,6 +16,10 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
+try:
+    import pandas_datareader.data as pdr_web
+except Exception:
+    pdr_web = None
 from plotly.subplots import make_subplots
 from scipy.signal import argrelextrema
 from scipy.stats import norm
@@ -644,6 +648,34 @@ def _fetch_fed_watch_series(alias: str, spec: dict[str, Any], start: pd.Timestam
     return scaled
 
 
+def _download_fred_batch_series(start: pd.Timestamp, end: pd.Timestamp) -> tuple[dict[str, pd.Series], str | None]:
+    if pdr_web is None:
+        return {}, "pandas_datareader is not available"
+
+    fred_codes = [str(spec["fred"]) for spec in FED_WATCH_SERIES_SPECS.values()]
+    code_to_alias = {str(spec["fred"]): alias for alias, spec in FED_WATCH_SERIES_SPECS.items()}
+
+    try:
+        frame = pdr_web.DataReader(fred_codes, "fred", start, end)
+    except Exception as exc:
+        return {}, str(exc)
+
+    if frame is None or frame.empty:
+        return {}, "batch FRED response was empty"
+
+    frame.index = normalize_datetime_index(frame.index)
+    frame = frame.sort_index()
+    batch_series: dict[str, pd.Series] = {}
+    for fred_code, alias in code_to_alias.items():
+        if fred_code not in frame.columns:
+            continue
+        scaled = pd.to_numeric(frame[fred_code], errors="coerce").dropna() * float(FED_WATCH_SERIES_SPECS[alias]["scale"])
+        scaled.name = alias
+        if not scaled.empty:
+            batch_series[alias] = scaled
+    return batch_series, None
+
+
 def _load_cached_fed_watch_series(cached_payload: dict[str, Any] | None, alias: str) -> pd.Series:
     if not cached_payload:
         return pd.Series(dtype=float, name=alias)
@@ -687,19 +719,29 @@ def _build_fed_watch_payload(
     stale_fallback_count = 0
     live_series: dict[str, pd.Series] = {}
     live_errors: dict[str, str] = {}
+    batch_series, batch_error = _download_fred_batch_series(start, end)
+    live_series.update(batch_series)
+    if batch_error and not batch_series:
+        warnings_list.append(f"Batch FRED request failed, falling back to per-series download: {batch_error}")
 
-    with ThreadPoolExecutor(max_workers=min(FED_WATCH_MAX_WORKERS, len(FED_WATCH_SERIES_SPECS))) as executor:
-        futures = {
-            executor.submit(_fetch_fed_watch_series, alias, spec, start, end): (alias, spec)
-            for alias, spec in FED_WATCH_SERIES_SPECS.items()
-        }
-        for future in as_completed(futures):
-            alias, spec = futures[future]
-            series_id = str(spec["fred"])
-            try:
-                live_series[alias] = future.result()
-            except Exception as exc:
-                live_errors[alias] = f"{alias} ({series_id}) failed to load: {exc}"
+    missing_specs = {
+        alias: spec
+        for alias, spec in FED_WATCH_SERIES_SPECS.items()
+        if alias not in live_series
+    }
+    if missing_specs:
+        with ThreadPoolExecutor(max_workers=min(FED_WATCH_MAX_WORKERS, len(missing_specs))) as executor:
+            futures = {
+                executor.submit(_fetch_fed_watch_series, alias, spec, start, end): (alias, spec)
+                for alias, spec in missing_specs.items()
+            }
+            for future in as_completed(futures):
+                alias, spec = futures[future]
+                series_id = str(spec["fred"])
+                try:
+                    live_series[alias] = future.result()
+                except Exception as exc:
+                    live_errors[alias] = f"{alias} ({series_id}) failed to load: {exc}"
 
     for alias, spec in FED_WATCH_SERIES_SPECS.items():
         series_id = str(spec["fred"])
