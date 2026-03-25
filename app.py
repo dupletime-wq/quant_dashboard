@@ -16,8 +16,10 @@ import streamlit as st
 import yfinance as yf
 try:
     import pandas_datareader.data as pdr_web
-except Exception:
+    PDR_IMPORT_ERROR: str | None = None
+except Exception as exc:
     pdr_web = None
+    PDR_IMPORT_ERROR = str(exc)
 from plotly.subplots import make_subplots
 from scipy.signal import argrelextrema
 from scipy.stats import norm
@@ -589,7 +591,8 @@ def _normalize_fed_watch_series(
 
 def _download_fred_batch_series(start: pd.Timestamp, end: pd.Timestamp) -> tuple[dict[str, pd.Series], str | None]:
     if pdr_web is None:
-        return {}, "pandas_datareader is not available"
+        detail = f": {PDR_IMPORT_ERROR}" if PDR_IMPORT_ERROR else ""
+        return {}, f"pandas_datareader import failed{detail}"
 
     fred_codes = [str(spec["fred"]) for spec in FED_WATCH_SERIES_SPECS.values()]
     code_to_alias = {str(spec["fred"]): alias for alias, spec in FED_WATCH_SERIES_SPECS.items()}
