@@ -2423,9 +2423,9 @@ def build_fed_watch_figure(fed_watch_data: dict[str, Any]) -> go.Figure:
     fig.update_yaxes(title_text="Spread (%)", row=3, col=2)
     fig.update_xaxes(tickformat="%Y-%m")
 
-    fig = apply_figure_style(fig, title="Fed Watch Liquidity Dashboard", height=1180, legend_y=1.12)
+    fig = apply_figure_style(fig, title="", height=1180, legend_y=1.12)
     fig.update_layout(
-        margin=dict(l=22, r=22, t=138, b=18),
+        margin=dict(l=22, r=22, t=118, b=18),
         legend=dict(
             orientation="h",
             y=1.12,
