@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import pickle
@@ -57,7 +58,6 @@ FED_WATCH_SERIES_SPECS = {
     "SOFR": {"fred": "SOFR", "scale": 1.0, "unit": "pct"},
     "IORB": {"fred": "IORB", "scale": 1.0, "unit": "pct"},
     "IOER": {"fred": "IOER", "scale": 1.0, "unit": "pct"},
-    "RRP_Rate": {"fred": "RRPONTSYAWARD", "scale": 1.0, "unit": "pct"},
     "US10Y": {"fred": "DGS10", "scale": 1.0, "unit": "pct"},
     "US3M": {"fred": "DGS3MO", "scale": 1.0, "unit": "pct"},
     "FED_Treasuries": {"fred": "WSHOTSL", "scale": 0.001, "unit": "billions"},
@@ -69,6 +69,8 @@ FED_WATCH_SERIES_SPECS = {
     "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
 }
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
+FED_WATCH_REQUEST_TIMEOUT = 8
+FED_WATCH_MAX_WORKERS = 6
 
 
 @dataclass
@@ -85,7 +87,7 @@ class DashboardSummary:
     options_label: str
 
 
-LOOKBACK_PERIOD = "3y"
+LOOKBACK_PERIOD = "2y"
 REALTIME_LAGS = [21, 63, 126, 252]
 MONTHLY_LAGS = [1, 3, 6, 12]
 CANARY_TICKERS = ["TIP", "QQQ", "SPY", "VEA", "VWO", "BND"]
@@ -506,8 +508,27 @@ def clear_daily_payload_cache(*names: str) -> None:
 
 
 def history_window_start(period: str) -> pd.Timestamp:
-    offset = FED_WATCH_PERIOD_OFFSETS.get(period, FED_WATCH_PERIOD_OFFSETS["3y"])
+    offset = FED_WATCH_PERIOD_OFFSETS.get(period, FED_WATCH_PERIOD_OFFSETS[LOOKBACK_PERIOD])
     return (pd.Timestamp.now().normalize() - offset).normalize()
+
+
+def active_history_window() -> str:
+    period = str(st.session_state.get("period", LOOKBACK_PERIOD))
+    return period if period in FED_WATCH_PERIOD_OFFSETS else LOOKBACK_PERIOD
+
+
+def trim_to_history_window(
+    data: pd.DataFrame | pd.Series,
+    *,
+    period: str | None = None,
+    pad_days: int = 0,
+) -> pd.DataFrame | pd.Series:
+    if data is None or getattr(data, "empty", True):
+        return data
+    if not isinstance(getattr(data, "index", None), pd.DatetimeIndex):
+        return data
+    start = history_window_start(period or active_history_window()) - pd.Timedelta(days=pad_days)
+    return data.loc[data.index >= start].copy()
 
 
 def _fred_series_url(series_id: str) -> str:
@@ -530,7 +551,7 @@ def _download_fred_csv_series(
             "coed": end.strftime("%Y-%m-%d"),
         },
         headers={"User-Agent": "Mozilla/5.0"},
-        timeout=20,
+        timeout=FED_WATCH_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
 
@@ -582,7 +603,62 @@ def _composite_latest_date(latest_dates: dict[str, pd.Timestamp], keys: list[str
     return min(dates)
 
 
-def _build_fed_watch_payload(period: str) -> dict[str, Any] | None:
+def _normalize_fed_watch_series(
+    alias: str,
+    series: pd.Series,
+    daily_index: pd.DatetimeIndex,
+) -> tuple[pd.Series, pd.Series, pd.Timestamp | None]:
+    clean = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+    if clean.empty:
+        return pd.Series(dtype=float, name=alias), pd.Series(index=daily_index, dtype=float, name=alias), None
+    clean.index = normalize_datetime_index(clean.index)
+    clean.name = alias
+    latest_date = _latest_series_date(clean)
+    aligned = clean.reindex(daily_index).ffill()
+    if alias == "IOER" and latest_date is not None:
+        aligned.loc[aligned.index > latest_date] = np.nan
+    return clean, aligned, latest_date
+
+
+def _fetch_fed_watch_series(alias: str, spec: dict[str, Any], start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+    series_id = str(spec["fred"])
+    raw = _download_fred_csv_series(series_id, start=start, end=end)
+    scaled = raw * float(spec["scale"])
+    scaled.name = alias
+    return scaled
+
+
+def _load_cached_fed_watch_series(cached_payload: dict[str, Any] | None, alias: str) -> pd.Series:
+    if not cached_payload:
+        return pd.Series(dtype=float, name=alias)
+
+    raw_series_map = cached_payload.get("raw_series", {})
+    cached_series = raw_series_map.get(alias) if isinstance(raw_series_map, dict) else None
+    if isinstance(cached_series, pd.Series):
+        cached_series = cached_series.copy()
+    else:
+        frame = cached_payload.get("frame")
+        if not isinstance(frame, pd.DataFrame) or alias not in frame.columns:
+            return pd.Series(dtype=float, name=alias)
+        cached_series = pd.to_numeric(frame[alias], errors="coerce")
+        latest_date = cached_payload.get("latest_dates", {}).get(alias) if isinstance(cached_payload.get("latest_dates"), dict) else None
+        if latest_date is not None:
+            cached_series = cached_series.loc[:latest_date]
+
+    cached_series = pd.to_numeric(cached_series, errors="coerce").dropna()
+    if cached_series.empty:
+        return pd.Series(dtype=float, name=alias)
+    cached_series.index = normalize_datetime_index(cached_series.index)
+    cached_series.name = alias
+    return cached_series.sort_index()
+
+
+def _build_fed_watch_payload(
+    period: str,
+    *,
+    cached_payload: dict[str, Any] | None = None,
+    cached_date: str | None = None,
+) -> dict[str, Any] | None:
     start = history_window_start(period)
     end = pd.Timestamp.now().normalize()
     daily_index = pd.date_range(start=start, end=end, freq="D")
@@ -592,48 +668,84 @@ def _build_fed_watch_payload(period: str) -> dict[str, Any] | None:
     warnings_list: list[str] = []
     latest_dates: dict[str, pd.Timestamp] = {}
     raw_series: dict[str, pd.Series] = {}
+    stale_fallback_count = 0
+    live_series: dict[str, pd.Series] = {}
+    live_errors: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=min(FED_WATCH_MAX_WORKERS, len(FED_WATCH_SERIES_SPECS))) as executor:
+        futures = {
+            executor.submit(_fetch_fed_watch_series, alias, spec, start, end): (alias, spec)
+            for alias, spec in FED_WATCH_SERIES_SPECS.items()
+        }
+        for future in as_completed(futures):
+            alias, spec = futures[future]
+            series_id = str(spec["fred"])
+            try:
+                live_series[alias] = future.result()
+            except Exception as exc:
+                live_errors[alias] = f"{alias} ({series_id}) failed to load: {exc}"
 
     for alias, spec in FED_WATCH_SERIES_SPECS.items():
         series_id = str(spec["fred"])
-        try:
-            raw = _download_fred_csv_series(series_id, start=start, end=end)
-            scaled = raw * float(spec["scale"])
-            scaled.name = alias
-            raw_series[alias] = scaled
-            latest_date = _latest_series_date(scaled)
-            if latest_date is not None:
-                latest_dates[alias] = latest_date
-            aligned = scaled.reindex(daily_index).ffill()
-            if alias == "IOER" and latest_date is not None:
-                aligned.loc[aligned.index > latest_date] = np.nan
-            frame[alias] = aligned
-            source_status.append(
-                {
-                    "Series": alias,
-                    "FRED Code": series_id,
-                    "Rows": int(scaled.dropna().shape[0]),
-                    "Latest": latest_date.strftime("%Y-%m-%d") if latest_date is not None else "n/a",
-                    "Unit": str(spec["unit"]),
-                    "Status": "OK" if not scaled.dropna().empty else "Empty",
-                    "URL": _fred_series_url(series_id),
-                }
-            )
-            if scaled.dropna().empty:
-                warnings_list.append(f"{alias} ({series_id}) returned no usable rows.")
-        except Exception as exc:
-            frame[alias] = np.nan
-            warnings_list.append(f"{alias} ({series_id}) failed to load: {exc}")
-            source_status.append(
-                {
-                    "Series": alias,
-                    "FRED Code": series_id,
-                    "Rows": 0,
-                    "Latest": "n/a",
-                    "Unit": str(spec["unit"]),
-                    "Status": "Failed",
-                    "URL": _fred_series_url(series_id),
-                }
-            )
+        source_label = "Live"
+        status_label = "OK"
+        warning_text = ""
+
+        preferred_series = live_series.get(alias)
+        clean, aligned, latest_date = _normalize_fed_watch_series(
+            alias,
+            preferred_series if isinstance(preferred_series, pd.Series) else pd.Series(dtype=float, name=alias),
+            daily_index,
+        )
+
+        if clean.empty:
+            cached_series = _load_cached_fed_watch_series(cached_payload, alias)
+            if not cached_series.empty:
+                clean, aligned, latest_date = _normalize_fed_watch_series(alias, cached_series, daily_index)
+                source_label = f"Cache {cached_date}" if cached_date else "Stale cache"
+                status_label = "Stale fallback"
+                stale_fallback_count += 1
+                if alias in live_errors:
+                    warning_text = f"{live_errors[alias]} Using cached series from {cached_date or 'a previous run'}."
+                else:
+                    warning_text = f"{alias} ({series_id}) returned no usable live rows. Using cached series from {cached_date or 'a previous run'}."
+            else:
+                frame[alias] = np.nan
+                status_label = "Failed" if alias in live_errors else "Empty"
+                warning_text = live_errors.get(alias, f"{alias} ({series_id}) returned no usable rows.")
+                source_status.append(
+                    {
+                        "Series": alias,
+                        "FRED Code": series_id,
+                        "Rows": 0,
+                        "Latest": "n/a",
+                        "Unit": str(spec["unit"]),
+                        "Source": "Unavailable",
+                        "Status": status_label,
+                        "URL": _fred_series_url(series_id),
+                    }
+                )
+                warnings_list.append(warning_text)
+                continue
+
+        raw_series[alias] = clean
+        if latest_date is not None:
+            latest_dates[alias] = latest_date
+        frame[alias] = aligned
+        source_status.append(
+            {
+                "Series": alias,
+                "FRED Code": series_id,
+                "Rows": int(clean.shape[0]),
+                "Latest": latest_date.strftime("%Y-%m-%d") if latest_date is not None else "n/a",
+                "Unit": str(spec["unit"]),
+                "Source": source_label,
+                "Status": status_label,
+                "URL": _fred_series_url(series_id),
+            }
+        )
+        if warning_text:
+            warnings_list.append(warning_text)
 
     if frame.dropna(how="all").empty:
         return None
@@ -665,12 +777,29 @@ def _build_fed_watch_payload(period: str) -> dict[str, Any] | None:
         "card_dates": card_dates,
         "source_status": pd.DataFrame(source_status),
         "warnings": warnings_list,
+        "stale_fallback_count": stale_fallback_count,
+        "stale_cache_date": cached_date,
     }
 
 
 def fetch_fed_watch_data(period: str) -> dict[str, Any] | None:
-    cache_period = period if period in FED_WATCH_PERIOD_OFFSETS else "3y"
-    return get_or_refresh_daily_payload(f"fed_watch_{cache_period}", lambda: _build_fed_watch_payload(cache_period))
+    cache_period = period if period in FED_WATCH_PERIOD_OFFSETS else LOOKBACK_PERIOD
+    cache_name = f"fed_watch_{cache_period}"
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_date, cached_data = load_daily_cached_payload(cache_name)
+    cache_is_current_format = (
+        isinstance(cached_data, dict)
+        and "stale_fallback_count" in cached_data
+        and isinstance(cached_data.get("source_status"), pd.DataFrame)
+    )
+    if cache_date == today and cached_data is not None and cache_is_current_format:
+        return cached_data
+
+    fresh_data = _build_fed_watch_payload(cache_period, cached_payload=cached_data, cached_date=cache_date)
+    if fresh_data is not None:
+        save_daily_cached_payload(cache_name, fresh_data)
+        return fresh_data
+    return cached_data
 
 
 def get_yfinance_candidates(ticker: str) -> list[str]:
@@ -695,7 +824,7 @@ def get_fdr_candidates(ticker: str) -> list[str]:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def download_price_data(ticker: str, period: str = "3y") -> tuple[pd.DataFrame, str, str]:
+def download_price_data(ticker: str, period: str = LOOKBACK_PERIOD) -> tuple[pd.DataFrame, str, str]:
     for candidate in get_yfinance_candidates(ticker):
         try:
             df = yf.download(
@@ -1065,7 +1194,7 @@ def apply_figure_style(
 
 
 def compute_overview_figure(df: pd.DataFrame) -> go.Figure:
-    view = df.tail(220).copy()
+    view = trim_to_history_window(df).copy()
     view["MA21"] = view["Close"].rolling(21).mean()
     view["MA50"] = view["Close"].rolling(50).mean()
     view["MA200"] = view["Close"].rolling(200).mean()
@@ -1143,7 +1272,7 @@ def elder_signal_label(state: int, long_term_up: bool) -> tuple[str, str]:
 
 
 def build_elder_figure(df: pd.DataFrame) -> go.Figure:
-    view = df.tail(220)
+    view = trim_to_history_window(df)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.05)
     fig.add_trace(
         go.Candlestick(
@@ -1237,7 +1366,7 @@ def td_signal_label(df: pd.DataFrame) -> tuple[str, str]:
 
 
 def build_td_figure(df: pd.DataFrame) -> go.Figure:
-    view = df.tail(180).copy()
+    view = trim_to_history_window(df).copy()
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.74, 0.26], vertical_spacing=0.05)
     fig.add_trace(
         go.Candlestick(
@@ -1405,7 +1534,7 @@ def stl_signal_label(score: float) -> tuple[str, str]:
 
 
 def build_stl_figure(df: pd.DataFrame) -> go.Figure:
-    view = df.tail(260).copy()
+    view = trim_to_history_window(df).copy()
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.05)
     fig.add_trace(
         go.Scatter(
@@ -1539,7 +1668,7 @@ def compute_smc(df: pd.DataFrame) -> dict[str, Any]:
     active_bull_fvg = filter_active_zones(bull_fvgs, work, limit=3, sort_key="size")
     active_bear_fvg = filter_active_zones(bear_fvgs, work, limit=3, sort_key="size")
 
-    view = work.tail(170).copy()
+    view = trim_to_history_window(work).copy()
     centers, profile = calculate_volume_profile(view)
     poc_price = float(centers[profile.argmax()]) if len(centers) else float("nan")
 
@@ -1772,7 +1901,7 @@ def compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3
     work["Direction"] = direction
     work["LongFlip"] = (work["Direction"] == 1) & (work["Direction"].shift(1) == -1)
     work["ShortFlip"] = (work["Direction"] == -1) & (work["Direction"].shift(1) == 1)
-    return work.tail(220).copy()
+    return trim_to_history_window(work).copy()
 
 
 def supertrend_signal_label(supertrend_df: pd.DataFrame | None) -> tuple[str, str]:
@@ -1839,7 +1968,7 @@ def compute_williams_vix_fix(
     work["WVF_Inv_RangeHigh"] = work["WVF_Inverse"].rolling(lb).max() * ph
     work["Overbought"] = (work["WVF_Inverse"] >= work["WVF_Inv_Upper"]) | (work["WVF_Inverse"] >= work["WVF_Inv_RangeHigh"])
     work["OverboughtExit"] = (work["Overbought"].shift(1).rolling(4).sum() == 4) & (~work["Overbought"])
-    return work.tail(220).copy()
+    return trim_to_history_window(work).copy()
 
 
 def vix_fix_signal_label(vix_fix_df: pd.DataFrame | None) -> tuple[str, str]:
@@ -1904,7 +2033,7 @@ def compute_squeeze_momentum(
     work["Momentum"] = (work["Close"] - (((high_roll + low_roll) / 2) + work["KC_Mid"]) / 2).rolling(5).mean()
     work["SqueezeOn"] = (work["LowerBB"] > work["LowerKC"]) & (work["UpperBB"] < work["UpperKC"])
     work["SqueezeOff"] = (work["LowerBB"] < work["LowerKC"]) & (work["UpperBB"] > work["UpperKC"])
-    return work.tail(220).copy()
+    return trim_to_history_window(work).copy()
 
 
 def squeeze_signal_label(squeeze_df: pd.DataFrame | None) -> tuple[str, str]:
@@ -1994,7 +2123,7 @@ def _fetch_market_fear_greed() -> dict[str, Any] | None:
     return {
         "latest_score": latest_score,
         "latest_factors": latest_factors,
-        "plot_df": plot_df.tail(260),
+        "plot_df": plot_df,
         "status": classify_market_score(latest_score),
     }
 
@@ -2004,7 +2133,7 @@ def compute_market_fear_greed() -> dict[str, Any] | None:
 
 
 def build_market_figure(market_data: dict[str, Any]) -> go.Figure:
-    plot_df = market_data["plot_df"]
+    plot_df = trim_to_history_window(market_data["plot_df"]).copy()
     latest_factors = market_data["latest_factors"]
     normalized_spy = (plot_df["SPY"] / plot_df["SPY"].iloc[0]) - 1
 
@@ -2301,6 +2430,12 @@ def build_fed_watch_figure(fed_watch_data: dict[str, Any]) -> go.Figure:
 
 
 def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
+    stale_fallback_count = int(fed_watch_data.get("stale_fallback_count", 0) or 0)
+    if stale_fallback_count > 0:
+        cache_date = fed_watch_data.get("stale_cache_date")
+        cache_text = f" from {cache_date}" if cache_date else ""
+        st.info(f"Using stale cache for {stale_fallback_count} slow FRED series{cache_text}.")
+
     warnings_list = fed_watch_data.get("warnings", [])
     if warnings_list:
         st.info("Partial FRED coverage: " + " | ".join(warnings_list[:4]))
@@ -2815,6 +2950,14 @@ def extract_spx_expiries(payload: dict[str, Any] | None) -> list[str]:
     return sorted(expiries)
 
 
+def nearest_spx_expiry(expiries: list[str]) -> str | None:
+    if not expiries:
+        return None
+    today = pd.Timestamp.now().normalize()
+    future_expiries = [expiry for expiry in expiries if pd.Timestamp(expiry) >= today]
+    return future_expiries[0] if future_expiries else expiries[0]
+
+
 def parse_spx_option_symbol(symbol: str) -> tuple[str, str, float] | None:
     match = re.search(r"(\d{6})([CP])(\d{8})$", symbol)
     if not match:
@@ -2861,7 +3004,10 @@ def compute_options_analytics(
     if not spot or not expiries:
         return None
 
-    selected_expiry = expiry if expiry in expiries else expiries[0]
+    default_expiry = nearest_spx_expiry(expiries)
+    selected_expiry = expiry if expiry in expiries else default_expiry
+    if selected_expiry is None:
+        return None
     target_token = pd.Timestamp(selected_expiry).strftime("%y%m%d")
     risk_free = get_risk_free_rate()
     vix_data = get_vix_term_structure()
@@ -3172,11 +3318,11 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         key="ticker_input",
     ).strip().upper()
     period_options = ["1y", "2y", "3y", "5y"]
-    default_period = st.session_state.get("period", "3y")
+    default_period = st.session_state.get("period", LOOKBACK_PERIOD)
     period = st.sidebar.selectbox(
         "History window",
         options=period_options,
-        index=period_options.index(default_period) if default_period in period_options else period_options.index("3y"),
+        index=period_options.index(default_period) if default_period in period_options else period_options.index(LOOKBACK_PERIOD),
         key="period_select",
     )
     last_core_view = st.session_state.get("last_core_view", CORE_DASHBOARD_VIEWS[0])
@@ -3241,8 +3387,18 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         spx_payload = fetch_spx_options_payload()
         spx_expiries = extract_spx_expiries(spx_payload)
         if spx_expiries:
-            saved_expiry = st.session_state.get("selected_spx_expiry")
-            default_index = spx_expiries.index(saved_expiry) if saved_expiry in spx_expiries else 0
+            default_expiry = nearest_spx_expiry(spx_expiries) or spx_expiries[0]
+            prior_auto_expiry = st.session_state.get("selected_spx_expiry_auto")
+            current_selected_expiry = st.session_state.get("selected_spx_expiry_select")
+            should_auto_select = (
+                current_selected_expiry not in spx_expiries
+                or current_selected_expiry is None
+                or (prior_auto_expiry != default_expiry and current_selected_expiry == prior_auto_expiry)
+            )
+            if should_auto_select:
+                st.session_state["selected_spx_expiry_select"] = default_expiry
+            st.session_state["selected_spx_expiry_auto"] = default_expiry
+            default_index = spx_expiries.index(st.session_state.get("selected_spx_expiry_select", default_expiry))
             selected_expiry = st.sidebar.selectbox(
                 "SPX option expiry",
                 options=spx_expiries,
@@ -3359,7 +3515,7 @@ def main() -> None:
         supertrend_data = compute_supertrend(price_df) if need_supertrend else None
         vix_fix_data = compute_williams_vix_fix(price_df) if need_vix_fix else None
         squeeze_data = compute_squeeze_momentum(price_df) if need_squeeze else None
-        canary_data = compute_canary_momentum_dashboard(period=LOOKBACK_PERIOD) if need_canary else None
+        canary_data = compute_canary_momentum_dashboard(period=period) if need_canary else None
         market_data = compute_market_fear_greed() if need_market else None
         options_data = compute_options_analytics(expiry=selected_expiry, payload=spx_payload) if need_options else None
         etf_sortino_data = compute_etf_sortino_leadership(top_n=sortino_top_n) if need_etf_sortino else None
