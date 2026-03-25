@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pickle
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import FinanceDataReader as fdr
@@ -69,8 +70,10 @@ FED_WATCH_SERIES_SPECS = {
     "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
 }
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
-FED_WATCH_REQUEST_TIMEOUT = 8
-FED_WATCH_MAX_WORKERS = 6
+FED_WATCH_REQUEST_TIMEOUT = 15
+FED_WATCH_RETRY_TIMEOUTS = (8, 15, 25)
+FED_WATCH_RETRY_SLEEP_SECONDS = 0.75
+FED_WATCH_MAX_WORKERS = 2
 
 
 @dataclass
@@ -543,17 +546,30 @@ def _download_fred_csv_series(
 ) -> pd.Series:
     from io import StringIO
 
-    response = requests.get(
-        "https://fred.stlouisfed.org/graph/fredgraph.csv",
-        params={
-            "id": series_id,
-            "cosd": start.strftime("%Y-%m-%d"),
-            "coed": end.strftime("%Y-%m-%d"),
-        },
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=FED_WATCH_REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
+    last_error: Exception | None = None
+    for attempt, timeout in enumerate(FED_WATCH_RETRY_TIMEOUTS, start=1):
+        try:
+            response = requests.get(
+                "https://fred.stlouisfed.org/graph/fredgraph.csv",
+                params={
+                    "id": series_id,
+                    "cosd": start.strftime("%Y-%m-%d"),
+                    "coed": end.strftime("%Y-%m-%d"),
+                },
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            break
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt == len(FED_WATCH_RETRY_TIMEOUTS):
+                raise
+            time.sleep(FED_WATCH_RETRY_SLEEP_SECONDS * attempt)
+    else:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Failed to download FRED series: {series_id}")
 
     frame = pd.read_csv(StringIO(response.text))
     if "DATE" not in frame.columns or series_id not in frame.columns:
