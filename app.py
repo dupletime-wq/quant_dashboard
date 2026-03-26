@@ -9,12 +9,14 @@ import sys
 from typing import Any
 
 import FinanceDataReader as fdr
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
+from matplotlib.patches import Wedge
 try:
     from setuptools import _distutils as setuptools_distutils
     sys.modules.setdefault("distutils", setuptools_distutils)
@@ -431,6 +433,75 @@ def display_view_name(view_name: str) -> str:
 
 def render_plotly_chart(fig: go.Figure) -> None:
     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+
+
+def mobile_charts_enabled() -> bool:
+    return bool(st.session_state.get("mobile_chart_mode", False))
+
+
+def render_chart(title: str, plotly_fig: go.Figure, mobile_builder: Any | None = None) -> None:
+    if mobile_charts_enabled() and callable(mobile_builder):
+        st.markdown(f"#### {title}")
+        mobile_fig = mobile_builder()
+        if mobile_fig is not None:
+            st.pyplot(mobile_fig, use_container_width=True)
+            plt.close(mobile_fig)
+        return
+    render_plotly_chart(plotly_fig)
+
+
+def _mobile_view_slice(data: pd.DataFrame | pd.Series, *, pad_days: int = 0) -> pd.DataFrame | pd.Series:
+    return trim_to_history_window(data, pad_days=pad_days)
+
+
+def _mobile_finalize_figure(fig: Any) -> Any:
+    fig.tight_layout(pad=1.2)
+    return fig
+
+
+def _mobile_style_axis(axis: Any, ylabel: str | None = None) -> None:
+    if ylabel:
+        axis.set_ylabel(ylabel, fontsize=9)
+    axis.grid(True, axis="y", alpha=0.22, color="#64748b")
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.tick_params(axis="x", labelsize=8)
+    axis.tick_params(axis="y", labelsize=8)
+
+
+def _mobile_shorten_labels(values: list[str], max_len: int = 20) -> list[str]:
+    labels: list[str] = []
+    for value in values:
+        text = str(value)
+        labels.append(text if len(text) <= max_len else f"{text[:max_len - 1]}...")
+    return labels
+
+
+def _build_mobile_gauge_figure(score_pct: float) -> Any:
+    fig, ax = plt.subplots(figsize=(6.4, 2.6), constrained_layout=True)
+    segments = [
+        (0, 20, "#dbeafe"),
+        (20, 40, "#dcfce7"),
+        (40, 60, "#f8fafc"),
+        (60, 80, "#fef3c7"),
+        (80, 100, "#fee2e2"),
+    ]
+    for start, end, color in segments:
+        theta1 = 180 - (end * 1.8)
+        theta2 = 180 - (start * 1.8)
+        ax.add_patch(Wedge((0, 0), 1.0, theta1, theta2, width=0.24, facecolor=color, edgecolor="none"))
+
+    score_pct = max(0.0, min(100.0, score_pct))
+    theta = np.deg2rad(180 - (score_pct * 1.8))
+    ax.plot([0, np.cos(theta) * 0.74], [0, np.sin(theta) * 0.74], color="#102a43", linewidth=4, solid_capstyle="round")
+    ax.scatter([0], [0], color="#102a43", s=40, zorder=3)
+    ax.text(0, 0.18, f"{score_pct:.1f}", ha="center", va="center", fontsize=22, color="#102a43", fontweight="bold")
+    ax.text(0, -0.14, "Fear <-> Greed", ha="center", va="center", fontsize=10, color="#52606d")
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_ylim(-0.08, 1.05)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    return fig
 
 
 def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1090,7 +1161,11 @@ def render_canary_dashboard(canary_data: dict[str, Any]) -> None:
         render_metric_card("Expected Rotation", top_assets, f"Fallback safe asset {SAFE_ASSET}", "accent")
 
     st.markdown('<div class="section-note">카나리아 자산(TIP, QQQ, SPY, VEA, VWO, BND)의 전월말 확정 모멘텀과 오늘 기준 실시간 모멘텀을 함께 비교해, 현재 포트폴리오와 다음 월말 리밸런싱 가능성을 한 번에 점검합니다.</div>', unsafe_allow_html=True)
-    render_plotly_chart(build_canary_attack_figure(canary_data["attack_report"]))
+    render_chart(
+        "Attack Universe Real-time Momentum Ranking",
+        build_canary_attack_figure(canary_data["attack_report"]),
+        mobile_builder=lambda: build_mobile_canary_attack_figure(canary_data["attack_report"]),
+    )
 
     table_left, table_right = st.columns([1.15, 1.0])
     with table_left:
@@ -1187,6 +1262,229 @@ def apply_figure_style(
     )
     fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False)
     return fig
+
+
+def build_mobile_elder_figure(df: pd.DataFrame) -> Any:
+    view = _mobile_view_slice(df).copy()
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.2), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    axes[0].plot(view.index, view["EMA13"], color="#64748b", linewidth=1.2, label="EMA13")
+    axes[0].plot(view.index, view["EMA65"], color="#dd6b20", linewidth=1.3, linestyle="--", label="EMA65")
+    axes[0].legend(loc="upper left", fontsize=8, frameon=False)
+    colors = np.where(view["MACD_Hist"] >= 0, "#0f766e", "#b42318")
+    axes[1].bar(view.index, view["MACD_Hist"], color=colors, width=2)
+    axes[1].axhline(0, color="#64748b", linestyle=":", linewidth=1)
+    _mobile_style_axis(axes[0], "Price")
+    _mobile_style_axis(axes[1], "MACD")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_td_figure(df: pd.DataFrame) -> Any:
+    view = _mobile_view_slice(df).copy()
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.3), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    for column, color in [("MA21", "#dd6b20"), ("MA50", "#2563eb"), ("MA200", "#111827")]:
+        axes[0].plot(view.index, view[column], color=color, linewidth=1.1, label=column)
+    axes[0].legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
+    axes[1].plot(view.index, view["RSI"], color="#7c3aed", linewidth=1.4)
+    axes[1].axhline(70, color="#b42318", linestyle=":", linewidth=1)
+    axes[1].axhline(30, color="#0f766e", linestyle=":", linewidth=1)
+    _mobile_style_axis(axes[0], "Price")
+    _mobile_style_axis(axes[1], "RSI")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_stl_figure(df: pd.DataFrame) -> Any:
+    view = _mobile_view_slice(df).copy()
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.1), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    axes[0].plot(view.index, view["Trend"], color="#0f766e", linewidth=1.3, label="Trend")
+    axes[0].legend(loc="upper left", fontsize=8, frameon=False)
+    axes[1].plot(view.index, view["Cycle_Score"], color="#f59e0b", linewidth=1.5)
+    axes[1].axhline(50, color="#64748b", linestyle=":", linewidth=1)
+    axes[1].fill_between(view.index, 0, 10, color="#dbeafe", alpha=0.5)
+    axes[1].fill_between(view.index, 90, 100, color="#fee2e2", alpha=0.5)
+    axes[1].set_ylim(0, 100)
+    _mobile_style_axis(axes[0], "Price")
+    _mobile_style_axis(axes[1], "Cycle")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_smc_figure(smc_data: dict[str, Any]) -> Any:
+    view = smc_data["view"].copy()
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.4), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    axes[0].plot(view.index, view["EMA21"], color="#dd6b20", linewidth=1.2, label="EMA21")
+    axes[0].plot(view.index, view["SMA200"], color="#111827", linewidth=1.2, linestyle="--", label="SMA200")
+    for zone in smc_data["active_bull_ob"][:2] + smc_data["active_bull_fvg"][:2]:
+        axes[0].axhspan(zone["bottom"], zone["top"], color="#0f766e", alpha=0.08)
+    for zone in smc_data["active_bear_ob"][:2] + smc_data["active_bear_fvg"][:2]:
+        axes[0].axhspan(zone["bottom"], zone["top"], color="#b42318", alpha=0.08)
+    axes[0].legend(loc="upper left", fontsize=8, frameon=False)
+    axes[1].plot(view.index, view["RSI"], color="#7c3aed", linewidth=1.4)
+    axes[1].axhline(70, color="#b42318", linestyle=":", linewidth=1)
+    axes[1].axhline(30, color="#0f766e", linestyle=":", linewidth=1)
+    _mobile_style_axis(axes[0], "Price")
+    _mobile_style_axis(axes[1], "RSI")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_supertrend_figure(df: pd.DataFrame) -> Any:
+    view = df.copy()
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.1), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    axes[0].plot(view.index, view["SuperTrend"], color="#0f766e", linewidth=1.4, label="SuperTrend")
+    long_flips = view[view["LongFlip"]]
+    short_flips = view[view["ShortFlip"]]
+    if not long_flips.empty:
+        axes[0].scatter(long_flips.index, long_flips["Low"] * 0.995, color="#0f766e", marker="^", s=28)
+    if not short_flips.empty:
+        axes[0].scatter(short_flips.index, short_flips["High"] * 1.005, color="#b42318", marker="v", s=28)
+    axes[0].legend(loc="upper left", fontsize=8, frameon=False)
+    axes[1].bar(view.index, view["ATR"], color="#64748b", width=2)
+    _mobile_style_axis(axes[0], "Price")
+    _mobile_style_axis(axes[1], "ATR")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_vix_fix_figure(df: pd.DataFrame) -> Any:
+    view = df.copy()
+    fig, axes = plt.subplots(3, 1, figsize=(6.4, 7.2), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [2.4, 1.2, 1.2]})
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8)
+    axes[1].bar(view.index, view["WVF"], color=np.where(view["Oversold"], "#0f766e", "#94a3b8"), width=2)
+    axes[1].plot(view.index, view["WVF_Upper"], color="#111827", linewidth=1.0, linestyle=":")
+    axes[2].bar(view.index, view["WVF_Inverse"], color=np.where(view["Overbought"], "#b42318", "#cbd5e1"), width=2)
+    axes[2].plot(view.index, view["WVF_Inv_Upper"], color="#334155", linewidth=1.0, linestyle=":")
+    _mobile_style_axis(axes[0], "Price")
+    _mobile_style_axis(axes[1], "WVF")
+    _mobile_style_axis(axes[2], "Inverse")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_squeeze_figure(df: pd.DataFrame) -> Any:
+    view = df.copy()
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.3), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    for column, color, style in [
+        ("UpperBB", "#b42318", "-"),
+        ("LowerBB", "#b42318", "-"),
+        ("UpperKC", "#0f766e", "--"),
+        ("LowerKC", "#0f766e", "--"),
+    ]:
+        axes[0].plot(view.index, view[column], color=color, linewidth=1.0, linestyle=style)
+    axes[1].bar(view.index, view["Momentum"], color=np.where(view["Momentum"] >= 0, "#0f766e", "#b42318"), width=2)
+    axes[1].axhline(0, color="#64748b", linestyle=":", linewidth=1)
+    _mobile_style_axis(axes[0], "Price")
+    _mobile_style_axis(axes[1], "Momentum")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_market_trend_figure(market_data: dict[str, Any]) -> Any:
+    plot_df = _mobile_view_slice(market_data["plot_df"]).copy()
+    fig, ax = plt.subplots(figsize=(6.4, 3.2), constrained_layout=True)
+    ax.plot(plot_df.index, plot_df["Score"], color="#0f766e", linewidth=1.8, label="Score")
+    ax.plot(plot_df.index, plot_df["Breadth"], color="#dd6b20", linewidth=1.1, label="Breadth")
+    ax.plot(plot_df.index, plot_df["Sector"], color="#2563eb", linewidth=1.1, label="Sector")
+    ax.plot(plot_df.index, plot_df["Credit"], color="#0f766e", linewidth=1.1, linestyle="--", label="Credit")
+    ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
+    _mobile_style_axis(ax, "Score")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_options_figure(options_data: dict[str, Any]) -> Any:
+    view = options_data["strike_view"].copy()
+    fig, axes = plt.subplots(3, 1, figsize=(6.4, 7.4), constrained_layout=True, gridspec_kw={"height_ratios": [1.3, 1.3, 0.9]})
+    axes[0].bar(view["strike"], view["gex"] / 1e9, color="#2563eb", width=12)
+    axes[0].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1)
+    axes[1].plot(view["strike"], view["pain"], color="#b42318", linewidth=1.8)
+    axes[1].fill_between(view["strike"], view["pain"], color="#fee2e2", alpha=0.5)
+    axes[1].axvline(options_data["max_pain"], color="#b42318", linestyle=":", linewidth=1)
+    score = float(options_data["put_call_ratio"]) * 50.0
+    score = max(0.0, min(100.0, score))
+    gauge = _build_mobile_gauge_figure(score)
+    plt.close(gauge)
+    axes[2].barh(["PCR"], [options_data["put_call_ratio"]], color="#102a43")
+    axes[2].set_xlim(0, 2)
+    axes[2].text(min(options_data["put_call_ratio"] + 0.03, 1.9), 0, f"{options_data['put_call_ratio']:.2f}", va="center", fontsize=9)
+    _mobile_style_axis(axes[0], "GEX (B)")
+    _mobile_style_axis(axes[1], "Pain")
+    _mobile_style_axis(axes[2], "PCR")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_fed_watch_section_figure(fed_watch_data: dict[str, Any], section: str) -> Any:
+    frame = fed_watch_data["frame"].copy()
+    subset = [column for column in ["SOFR", "IORB_Combined", "WALCL", "TGA", "ON_RRP"] if column in frame.columns]
+    if subset:
+        frame = frame.dropna(how="all", subset=subset)
+    fig, ax = plt.subplots(figsize=(6.4, 2.8), constrained_layout=True)
+    if section == "Collateral Supply":
+        if _frame_has_data(frame, "FED_Treasuries"):
+            ax.plot(frame.index, frame["FED_Treasuries"], color="#b42318", linewidth=1.5, linestyle="--", label="Fed Treasuries")
+        if _frame_has_data(frame, "Bank_Treasuries"):
+            ax.plot(frame.index, frame["Bank_Treasuries"], color="#2563eb", linewidth=1.5, label="Bank Treasuries")
+        ax.legend(loc="upper left", fontsize=8, frameon=False)
+        _mobile_style_axis(ax, "Billions USD")
+    elif section == "Dealer Incentive":
+        if _frame_has_data(frame, "Spread_Carry"):
+            ax.plot(frame.index, frame["Spread_Carry"], color="#7f1d1d", linewidth=1.7)
+            ax.axhline(0, color="#64748b", linestyle=":", linewidth=1)
+        _mobile_style_axis(ax, "Spread (%)")
+    elif section == "Plumbing Stress":
+        if _frame_has_data(frame, "SOFR"):
+            ax.plot(frame.index, frame["SOFR"], color="#111827", linewidth=1.4, label="SOFR")
+        if _frame_has_data(frame, "IORB_Combined"):
+            ax.plot(frame.index, frame["IORB_Combined"], color="#b42318", linewidth=1.4, linestyle="--", label="IORB / IOER")
+        ax.legend(loc="upper left", fontsize=8, frameon=False)
+        _mobile_style_axis(ax, "Rate (%)")
+    elif section == "Funding Volume":
+        if _frame_has_data(frame, "SOFR_Vol"):
+            ax.plot(frame.index, frame["SOFR_Vol"], color="#7c3aed", linewidth=1.7)
+        _mobile_style_axis(ax, "Billions USD")
+    elif section == "Treasury and Fed Drains":
+        if _frame_has_data(frame, "TGA"):
+            ax.plot(frame.index, frame["TGA"], color="#dd6b20", linewidth=1.4, label="TGA")
+        if _frame_has_data(frame, "ON_RRP"):
+            ax.plot(frame.index, frame["ON_RRP"], color="#2563eb", linewidth=1.4, label="ON RRP")
+        if _frame_has_data(frame, "Reserves"):
+            ax.plot(frame.index, frame["Reserves"], color="#0f766e", linewidth=1.4, linestyle="--", label="Reserves")
+        ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
+        _mobile_style_axis(ax, "Billions USD")
+    elif section == "Traditional Curve":
+        if _frame_has_data(frame, "Spread_Curve"):
+            ax.plot(frame.index, frame["Spread_Curve"], color="#102a43", linewidth=1.7)
+            ax.axhline(0, color="#b42318", linestyle=":", linewidth=1)
+        _mobile_style_axis(ax, "Spread (%)")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_canary_attack_figure(df_assets: pd.DataFrame, top_n: int = 6) -> Any:
+    view = df_assets.head(top_n).copy().sort_values("실시간 평균 모멘텀(%)", ascending=True)
+    fig, ax = plt.subplots(figsize=(6.4, 3.2), constrained_layout=True)
+    colors = ["#0f766e" if (not pd.isna(v) and v >= 0) else "#b42318" for v in view["실시간 평균 모멘텀(%)"]]
+    ax.barh(view["자산"], view["실시간 평균 모멘텀(%)"], color=colors)
+    ax.axvline(0, color="#64748b", linestyle=":", linewidth=1)
+    _mobile_style_axis(ax, "Momentum (%)")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_etf_sortino_figure(leaderboard: pd.DataFrame, top_n: int = 10) -> Any:
+    view = leaderboard.head(top_n).copy().sort_values("Sortino", ascending=True)
+    fig, ax = plt.subplots(figsize=(6.4, 4.2), constrained_layout=True)
+    labels = _mobile_shorten_labels(view["Ticker"].astype(str).tolist(), max_len=10)
+    colors = ["#0f766e" if not np.isnan(value) and value >= 0 else "#b42318" for value in view["Sortino"]]
+    ax.barh(labels, view["Sortino"], color=colors)
+    ax.axvline(0, color="#64748b", linestyle=":", linewidth=1)
+    _mobile_style_axis(ax, "Sortino")
+    return _mobile_finalize_figure(fig)
+
+
+def build_mobile_etf_sector_share_figure(sector_df: pd.DataFrame, top_n: int = 8) -> Any:
+    view = sector_df.head(top_n).copy().sort_values("Share", ascending=True)
+    fig, ax = plt.subplots(figsize=(6.4, 3.6), constrained_layout=True)
+    ax.barh(_mobile_shorten_labels(view["Sector"].astype(str).tolist()), view["Share"], color="#2563eb")
+    _mobile_style_axis(ax, "Share")
+    return _mobile_finalize_figure(fig)
 
 
 def compute_overview_figure(df: pd.DataFrame) -> go.Figure:
@@ -2488,7 +2786,21 @@ def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
         '<div class="section-note">This view tracks collateral supply, funding stress, treasury cash drains, and a simple net-liquidity proxy using official FRED series. Values are normalized to billions of dollars where applicable.</div>',
         unsafe_allow_html=True,
     )
-    render_plotly_chart(build_fed_watch_figure(fed_watch_data))
+    if mobile_charts_enabled():
+        for section_title in [
+            "Collateral Supply",
+            "Dealer Incentive",
+            "Plumbing Stress",
+            "Funding Volume",
+            "Treasury and Fed Drains",
+            "Traditional Curve",
+        ]:
+            st.markdown(f"#### {section_title}")
+            fig = build_mobile_fed_watch_section_figure(fed_watch_data, section_title)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+    else:
+        render_plotly_chart(build_fed_watch_figure(fed_watch_data))
 
     with st.expander("Fed Watch diagnostics", expanded=False):
         status_frame = fed_watch_data["source_status"].copy()
@@ -2933,7 +3245,11 @@ def render_etf_sortino_dashboard(sortino_data: dict[str, Any]) -> None:
     with summary_cards[3]:
         render_metric_card("Top ETF", sortino_data["top_etf"], sortino_data["top_etf_name"], "bull")
 
-    render_plotly_chart(build_etf_sortino_figure(sortino_data["leaderboard"]))
+    render_chart(
+        "ETF Sortino Leadership Ranking",
+        build_etf_sortino_figure(sortino_data["leaderboard"]),
+        mobile_builder=lambda: build_mobile_etf_sortino_figure(sortino_data["leaderboard"]),
+    )
 
     table_left, table_right = st.columns([1.1, 0.9])
     with table_left:
@@ -2951,7 +3267,11 @@ def render_etf_sortino_dashboard(sortino_data: dict[str, Any]) -> None:
         if sortino_data["sector_share"].empty:
             st.info("Sector holdings coverage is limited for the current ETF leadership set.")
         else:
-            render_plotly_chart(build_etf_sector_share_figure(sortino_data["sector_share"]))
+            render_chart(
+                "Top ETF Sector Share",
+                build_etf_sector_share_figure(sortino_data["sector_share"]),
+                mobile_builder=lambda: build_mobile_etf_sector_share_figure(sortino_data["sector_share"]),
+            )
             sector_stats = sortino_data["sector_stats"].copy()
             sector_stats["Sector Share"] = sector_stats["Sector Share"].map(lambda value: f"{value:.1%}")
             st.dataframe(sector_stats, use_container_width=True, hide_index=True)
@@ -3399,6 +3719,13 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         st.cache_data.clear()
         clear_daily_payload_cache()
         st.session_state["force_refresh_toggle"] = False
+    mobile_chart_mode = st.sidebar.checkbox(
+        "Mobile-friendly charts",
+        value=bool(st.session_state.get("mobile_chart_mode", False)),
+        key="mobile_chart_mode_toggle",
+        help="Use simplified matplotlib charts designed for narrow screens.",
+    )
+    st.session_state["mobile_chart_mode"] = mobile_chart_mode
     st.sidebar.caption("Examples: NVDA, QQQ, SPY, TSLA, 005930.KS, 035420.KQ, BTC-USD")
     st.sidebar.caption("Korean equities accept both Yahoo suffixes and plain 6-digit codes.")
 
@@ -3574,23 +3901,23 @@ def main() -> None:
     )
 
     if active_view == "Elder Impulse":
-        render_plotly_chart(build_elder_figure(elder_df))
+        render_chart("Elder Impulse and Trend Filter", build_elder_figure(elder_df), mobile_builder=lambda: build_mobile_elder_figure(elder_df))
     elif active_view == "TD Sequential":
-        render_plotly_chart(build_td_figure(td_df))
+        render_chart("TD Sequential with Trend Context", build_td_figure(td_df), mobile_builder=lambda: build_mobile_td_figure(td_df))
     elif active_view == "Robust STL":
         if stl_df is None or stl_df.dropna(subset=["Trend", "Cycle_Score"]).empty:
             st.info("Robust STL could not build a valid cycle series for this ticker after trying both FinanceDataReader and Yahoo Finance.")
         else:
-            render_plotly_chart(build_stl_figure(stl_df))
+            render_chart("Robust STL Cycle Dashboard", build_stl_figure(stl_df), mobile_builder=lambda: build_mobile_stl_figure(stl_df))
             st.caption(f"STL source: {stl_source} via `{stl_symbol}`")
     elif active_view == "SMC":
-        render_plotly_chart(build_smc_figure(smc_data))
+        render_chart("Smart Money Concepts", build_smc_figure(smc_data), mobile_builder=lambda: build_mobile_smc_figure(smc_data))
     elif active_view == "SuperTrend":
-        render_plotly_chart(build_supertrend_figure(supertrend_data))
+        render_chart("SuperTrend Regime", build_supertrend_figure(supertrend_data), mobile_builder=lambda: build_mobile_supertrend_figure(supertrend_data))
     elif active_view == "Williams Vix Fix":
-        render_plotly_chart(build_vix_fix_figure(vix_fix_data))
+        render_chart("Williams Vix Fix / Inverse", build_vix_fix_figure(vix_fix_data), mobile_builder=lambda: build_mobile_vix_fix_figure(vix_fix_data))
     elif active_view == "Squeeze Momentum":
-        render_plotly_chart(build_squeeze_figure(squeeze_data))
+        render_chart("Squeeze Momentum", build_squeeze_figure(squeeze_data), mobile_builder=lambda: build_mobile_squeeze_figure(squeeze_data))
     elif active_view == "Canary Momentum":
         if not canary_data:
             st.info("Canary momentum data could not be loaded from Yahoo Finance for the required universe.")
@@ -3600,7 +3927,17 @@ def main() -> None:
         if not market_data:
             st.info("Fear & Greed data could not be loaded from Yahoo Finance for the required macro basket.")
         else:
-            render_plotly_chart(build_market_figure(market_data))
+            if mobile_charts_enabled():
+                st.markdown("#### Macro Fear and Greed Gauge")
+                gauge_fig = _build_mobile_gauge_figure(market_data["latest_score"] * 100)
+                st.pyplot(gauge_fig, use_container_width=True)
+                plt.close(gauge_fig)
+                st.markdown("#### Internal Health Trend")
+                trend_fig = build_mobile_market_trend_figure(market_data)
+                st.pyplot(trend_fig, use_container_width=True)
+                plt.close(trend_fig)
+            else:
+                render_plotly_chart(build_market_figure(market_data))
     elif active_view == "Options Flow":
         if not options_data:
             st.info("SPX option data could not be loaded from the CBOE delayed quotes feed.")
@@ -3614,7 +3951,11 @@ def main() -> None:
                 render_metric_card("Max Pain", f"{options_data['max_pain']:.2f}", "Strike with minimum aggregate pain", "neutral")
             with option_cards[3]:
                 render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e9:,.2f}B", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
-            render_plotly_chart(build_options_figure(options_data, options_data["spot"]))
+            render_chart(
+                f"SPX Options Positioning ({options_data['expiry']})",
+                build_options_figure(options_data, options_data["spot"]),
+                mobile_builder=lambda: build_mobile_options_figure(options_data),
+            )
     elif active_view == "ETF Sortino Leadership":
         if not etf_sortino_data:
             st.info("ETF Sortino leadership data could not be constructed from the current Yahoo Finance ETF universe and holdings coverage.")
