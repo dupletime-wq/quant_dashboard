@@ -9,6 +9,7 @@ import sys
 from typing import Any
 
 import FinanceDataReader as fdr
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
-from matplotlib.patches import Wedge
+from matplotlib.patches import Rectangle, Wedge
 try:
     from setuptools import _distutils as setuptools_distutils
     sys.modules.setdefault("distutils", setuptools_distutils)
@@ -467,6 +468,63 @@ def _mobile_style_axis(axis: Any, ylabel: str | None = None) -> None:
     axis.spines["right"].set_visible(False)
     axis.tick_params(axis="x", labelsize=8)
     axis.tick_params(axis="y", labelsize=8)
+    if hasattr(axis, "xaxis"):
+        axis.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=6))
+        axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+
+
+def _mobile_add_candlesticks(axis: Any, df: pd.DataFrame, width_ratio: float = 0.65) -> None:
+    if df.empty:
+        return
+    dates = mdates.date2num(pd.to_datetime(df.index).to_pydatetime())
+    step = float(np.median(np.diff(dates))) if len(dates) > 1 else 1.0
+    width = max(step * width_ratio, 0.35)
+    for idx, row in enumerate(df.itertuples()):
+        open_price = float(row.Open)
+        high_price = float(row.High)
+        low_price = float(row.Low)
+        close_price = float(row.Close)
+        color = "#0f766e" if close_price >= open_price else "#b42318"
+        axis.vlines(dates[idx], low_price, high_price, color=color, linewidth=0.8, alpha=0.9)
+        body_low = min(open_price, close_price)
+        body_height = max(abs(close_price - open_price), 1e-6)
+        axis.add_patch(
+            Rectangle(
+                (dates[idx] - width / 2, body_low),
+                width,
+                body_height,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=0.8,
+                alpha=0.75,
+            )
+        )
+    axis.xaxis_date()
+
+
+def _draw_mobile_gauge(axis: Any, score_pct: float, subtitle: str) -> None:
+    segments = [
+        (0, 20, "#dbeafe"),
+        (20, 40, "#dcfce7"),
+        (40, 60, "#f8fafc"),
+        (60, 80, "#fef3c7"),
+        (80, 100, "#fee2e2"),
+    ]
+    for start, end, color in segments:
+        theta1 = 180 - (end * 1.8)
+        theta2 = 180 - (start * 1.8)
+        axis.add_patch(Wedge((0, 0), 1.0, theta1, theta2, width=0.24, facecolor=color, edgecolor="none"))
+
+    score_pct = max(0.0, min(100.0, score_pct))
+    theta = np.deg2rad(180 - (score_pct * 1.8))
+    axis.plot([0, np.cos(theta) * 0.74], [0, np.sin(theta) * 0.74], color="#102a43", linewidth=4, solid_capstyle="round")
+    axis.scatter([0], [0], color="#102a43", s=40, zorder=3)
+    axis.text(0, 0.18, f"{score_pct:.1f}", ha="center", va="center", fontsize=22, color="#102a43", fontweight="bold")
+    axis.text(0, -0.14, subtitle, ha="center", va="center", fontsize=10, color="#52606d")
+    axis.set_xlim(-1.05, 1.05)
+    axis.set_ylim(-0.08, 1.05)
+    axis.set_aspect("equal")
+    axis.axis("off")
 
 
 def _mobile_shorten_labels(values: list[str], max_len: int = 20) -> list[str]:
@@ -479,28 +537,7 @@ def _mobile_shorten_labels(values: list[str], max_len: int = 20) -> list[str]:
 
 def _build_mobile_gauge_figure(score_pct: float) -> Any:
     fig, ax = plt.subplots(figsize=(6.4, 2.6), constrained_layout=True)
-    segments = [
-        (0, 20, "#dbeafe"),
-        (20, 40, "#dcfce7"),
-        (40, 60, "#f8fafc"),
-        (60, 80, "#fef3c7"),
-        (80, 100, "#fee2e2"),
-    ]
-    for start, end, color in segments:
-        theta1 = 180 - (end * 1.8)
-        theta2 = 180 - (start * 1.8)
-        ax.add_patch(Wedge((0, 0), 1.0, theta1, theta2, width=0.24, facecolor=color, edgecolor="none"))
-
-    score_pct = max(0.0, min(100.0, score_pct))
-    theta = np.deg2rad(180 - (score_pct * 1.8))
-    ax.plot([0, np.cos(theta) * 0.74], [0, np.sin(theta) * 0.74], color="#102a43", linewidth=4, solid_capstyle="round")
-    ax.scatter([0], [0], color="#102a43", s=40, zorder=3)
-    ax.text(0, 0.18, f"{score_pct:.1f}", ha="center", va="center", fontsize=22, color="#102a43", fontweight="bold")
-    ax.text(0, -0.14, "Fear <-> Greed", ha="center", va="center", fontsize=10, color="#52606d")
-    ax.set_xlim(-1.05, 1.05)
-    ax.set_ylim(-0.08, 1.05)
-    ax.set_aspect("equal")
-    ax.axis("off")
+    _draw_mobile_gauge(ax, score_pct, "Fear <-> Greed")
     return fig
 
 
@@ -1266,13 +1303,19 @@ def apply_figure_style(
 
 def build_mobile_elder_figure(df: pd.DataFrame) -> Any:
     view = _mobile_view_slice(df).copy()
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.2), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
-    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 7.0), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3.2, 1.1]})
+    _mobile_add_candlesticks(axes[0], view)
     axes[0].plot(view.index, view["EMA13"], color="#64748b", linewidth=1.2, label="EMA13")
     axes[0].plot(view.index, view["EMA65"], color="#dd6b20", linewidth=1.3, linestyle="--", label="EMA65")
+    if view["Buy_Signal"].notna().any():
+        buys = view.loc[view["Buy_Signal"].notna()]
+        axes[0].scatter(buys.index, buys["Buy_Signal"], color="#0f766e", marker="^", s=26, label="Buy")
+    if view["Sell_Signal"].notna().any():
+        sells = view.loc[view["Sell_Signal"].notna()]
+        axes[0].scatter(sells.index, sells["Sell_Signal"], color="#b42318", marker="v", s=26, label="Sell")
     axes[0].legend(loc="upper left", fontsize=8, frameon=False)
     colors = np.where(view["MACD_Hist"] >= 0, "#0f766e", "#b42318")
-    axes[1].bar(view.index, view["MACD_Hist"], color=colors, width=2)
+    axes[1].bar(view.index, view["MACD_Hist"], color=colors, width=3)
     axes[1].axhline(0, color="#64748b", linestyle=":", linewidth=1)
     _mobile_style_axis(axes[0], "Price")
     _mobile_style_axis(axes[1], "MACD")
@@ -1281,10 +1324,26 @@ def build_mobile_elder_figure(df: pd.DataFrame) -> Any:
 
 def build_mobile_td_figure(df: pd.DataFrame) -> Any:
     view = _mobile_view_slice(df).copy()
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.3), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
-    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 7.1), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3.2, 1.1]})
+    _mobile_add_candlesticks(axes[0], view)
     for column, color in [("MA21", "#dd6b20"), ("MA50", "#2563eb"), ("MA200", "#111827")]:
         axes[0].plot(view.index, view[column], color=color, linewidth=1.1, label=column)
+    cloud_mask = view["Senkou_Span_A"].notna() & view["Senkou_Span_B"].notna()
+    if cloud_mask.any():
+        xvals = view.index[cloud_mask]
+        span_a = view.loc[cloud_mask, "Senkou_Span_A"]
+        span_b = view.loc[cloud_mask, "Senkou_Span_B"]
+        axes[0].fill_between(xvals, span_a, span_b, color="#f59e0b", alpha=0.08)
+    recent_view = view.tail(80)
+    for idx, row in recent_view.iterrows():
+        if row["Buy_Setup"] in {7, 8, 9}:
+            axes[0].annotate(f"B{int(row['Buy_Setup'])}", (idx, row["Low"] * 0.992), fontsize=7, color="#0f766e")
+        if row["Sell_Setup"] in {7, 8, 9}:
+            axes[0].annotate(f"S{int(row['Sell_Setup'])}", (idx, row["High"] * 1.008), fontsize=7, color="#b42318")
+        if row["Buy_Countdown"] == 13:
+            axes[0].annotate("BUY 13", (idx, row["Low"] * 0.975), fontsize=7, color="#0f766e")
+        if row["Sell_Countdown"] == 13:
+            axes[0].annotate("SELL 13", (idx, row["High"] * 1.02), fontsize=7, color="#b42318")
     axes[0].legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
     axes[1].plot(view.index, view["RSI"], color="#7c3aed", linewidth=1.4)
     axes[1].axhline(70, color="#b42318", linestyle=":", linewidth=1)
@@ -1296,8 +1355,18 @@ def build_mobile_td_figure(df: pd.DataFrame) -> Any:
 
 def build_mobile_stl_figure(df: pd.DataFrame) -> Any:
     view = _mobile_view_slice(df).copy()
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.1), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
-    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.4), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1.1]})
+    scatter = axes[0].scatter(
+        view.index,
+        view["Close"],
+        c=view["Cycle_Score"],
+        cmap="RdYlBu_r",
+        vmin=0,
+        vmax=100,
+        s=12,
+        zorder=3,
+    )
+    axes[0].plot(view.index, view["Close"], color="rgba(15,23,42,0.18)", linewidth=0.7, alpha=0.35)
     axes[0].plot(view.index, view["Trend"], color="#0f766e", linewidth=1.3, label="Trend")
     axes[0].legend(loc="upper left", fontsize=8, frameon=False)
     axes[1].plot(view.index, view["Cycle_Score"], color="#f59e0b", linewidth=1.5)
@@ -1307,19 +1376,32 @@ def build_mobile_stl_figure(df: pd.DataFrame) -> Any:
     axes[1].set_ylim(0, 100)
     _mobile_style_axis(axes[0], "Price")
     _mobile_style_axis(axes[1], "Cycle")
+    fig.colorbar(scatter, ax=axes[0], pad=0.01, shrink=0.6)
     return _mobile_finalize_figure(fig)
 
 
 def build_mobile_smc_figure(smc_data: dict[str, Any]) -> Any:
     view = smc_data["view"].copy()
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.4), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
-    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 7.2), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3.2, 1.0]})
+    _mobile_add_candlesticks(axes[0], view)
     axes[0].plot(view.index, view["EMA21"], color="#dd6b20", linewidth=1.2, label="EMA21")
     axes[0].plot(view.index, view["SMA200"], color="#111827", linewidth=1.2, linestyle="--", label="SMA200")
-    for zone in smc_data["active_bull_ob"][:2] + smc_data["active_bull_fvg"][:2]:
-        axes[0].axhspan(zone["bottom"], zone["top"], color="#0f766e", alpha=0.08)
-    for zone in smc_data["active_bear_ob"][:2] + smc_data["active_bear_fvg"][:2]:
-        axes[0].axhspan(zone["bottom"], zone["top"], color="#b42318", alpha=0.08)
+    x0 = view.index[0]
+    x1 = view.index[-1]
+    for zone in smc_data["active_bull_ob"][:2]:
+        axes[0].fill_between([x0, x1], zone["bottom"], zone["top"], color="#0f766e", alpha=0.12)
+    for zone in smc_data["active_bear_ob"][:2]:
+        axes[0].fill_between([x0, x1], zone["bottom"], zone["top"], color="#b42318", alpha=0.12)
+    for zone in smc_data["active_bull_fvg"][:2]:
+        axes[0].fill_between([x0, x1], zone["bottom"], zone["top"], color="#2563eb", alpha=0.10)
+    for zone in smc_data["active_bear_fvg"][:2]:
+        axes[0].fill_between([x0, x1], zone["bottom"], zone["top"], color="#dd6b20", alpha=0.10)
+    if not np.isnan(smc_data["poc_price"]):
+        axes[0].axhline(smc_data["poc_price"], color="#334155", linewidth=1.1, linestyle="--")
+    if not np.isnan(smc_data["eq_price"]):
+        axes[0].axhline(smc_data["eq_price"], color="#f59e0b", linewidth=1.1)
+    for level in smc_data["levels"][:4]:
+        axes[0].axhline(level["price"], color="#0f766e" if level["type"] == "L" else "#b42318", linewidth=0.8, linestyle=":")
     axes[0].legend(loc="upper left", fontsize=8, frameon=False)
     axes[1].plot(view.index, view["RSI"], color="#7c3aed", linewidth=1.4)
     axes[1].axhline(70, color="#b42318", linestyle=":", linewidth=1)
@@ -1331,9 +1413,10 @@ def build_mobile_smc_figure(smc_data: dict[str, Any]) -> Any:
 
 def build_mobile_supertrend_figure(df: pd.DataFrame) -> Any:
     view = df.copy()
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.1), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
-    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
-    axes[0].plot(view.index, view["SuperTrend"], color="#0f766e", linewidth=1.4, label="SuperTrend")
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.7), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3.1, 1.0]})
+    _mobile_add_candlesticks(axes[0], view)
+    axes[0].plot(view.index, view["SuperTrend"].where(view["Direction"] > 0), color="#0f766e", linewidth=1.5, label="Bull ST")
+    axes[0].plot(view.index, view["SuperTrend"].where(view["Direction"] < 0), color="#b42318", linewidth=1.5, label="Bear ST")
     long_flips = view[view["LongFlip"]]
     short_flips = view[view["ShortFlip"]]
     if not long_flips.empty:
@@ -1349,12 +1432,20 @@ def build_mobile_supertrend_figure(df: pd.DataFrame) -> Any:
 
 def build_mobile_vix_fix_figure(df: pd.DataFrame) -> Any:
     view = df.copy()
-    fig, axes = plt.subplots(3, 1, figsize=(6.4, 7.2), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [2.4, 1.2, 1.2]})
-    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8)
-    axes[1].bar(view.index, view["WVF"], color=np.where(view["Oversold"], "#0f766e", "#94a3b8"), width=2)
+    fig, axes = plt.subplots(3, 1, figsize=(6.4, 8.0), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [2.3, 1.2, 1.2]})
+    _mobile_add_candlesticks(axes[0], view)
+    oversold_exit = view[view["OversoldExit"]]
+    overbought_exit = view[view["OverboughtExit"]]
+    if not oversold_exit.empty:
+        axes[0].scatter(oversold_exit.index, oversold_exit["Low"] * 0.99, color="#0f766e", marker="D", s=22)
+    if not overbought_exit.empty:
+        axes[0].scatter(overbought_exit.index, overbought_exit["High"] * 1.01, color="#b42318", marker="D", s=22)
+    axes[1].bar(view.index, view["WVF"], color=np.where(view["Oversold"], "#0f766e", "#94a3b8"), width=3)
     axes[1].plot(view.index, view["WVF_Upper"], color="#111827", linewidth=1.0, linestyle=":")
+    axes[1].plot(view.index, view["WVF_RangeHigh"], color="#dd6b20", linewidth=1.0)
     axes[2].bar(view.index, view["WVF_Inverse"], color=np.where(view["Overbought"], "#b42318", "#cbd5e1"), width=2)
     axes[2].plot(view.index, view["WVF_Inv_Upper"], color="#334155", linewidth=1.0, linestyle=":")
+    axes[2].plot(view.index, view["WVF_Inv_RangeHigh"], color="#7c3aed", linewidth=1.0)
     _mobile_style_axis(axes[0], "Price")
     _mobile_style_axis(axes[1], "WVF")
     _mobile_style_axis(axes[2], "Inverse")
@@ -1363,8 +1454,8 @@ def build_mobile_vix_fix_figure(df: pd.DataFrame) -> Any:
 
 def build_mobile_squeeze_figure(df: pd.DataFrame) -> Any:
     view = df.copy()
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.3), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3, 1]})
-    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=1.8, label="Close")
+    fig, axes = plt.subplots(2, 1, figsize=(6.4, 6.9), sharex=True, constrained_layout=True, gridspec_kw={"height_ratios": [3.1, 1.0]})
+    _mobile_add_candlesticks(axes[0], view)
     for column, color, style in [
         ("UpperBB", "#b42318", "-"),
         ("LowerBB", "#b42318", "-"),
@@ -1372,89 +1463,120 @@ def build_mobile_squeeze_figure(df: pd.DataFrame) -> Any:
         ("LowerKC", "#0f766e", "--"),
     ]:
         axes[0].plot(view.index, view[column], color=color, linewidth=1.0, linestyle=style)
-    axes[1].bar(view.index, view["Momentum"], color=np.where(view["Momentum"] >= 0, "#0f766e", "#b42318"), width=2)
+    axes[1].bar(view.index, view["Momentum"], color=np.where(view["Momentum"] >= 0, "#0f766e", "#b42318"), width=3)
+    marker_colors = np.where(view["SqueezeOn"], "#111827", np.where(view["SqueezeOff"], "#f59e0b", "#cbd5e1"))
+    axes[1].scatter(view.index, np.zeros(len(view)), color=marker_colors, s=10)
     axes[1].axhline(0, color="#64748b", linestyle=":", linewidth=1)
     _mobile_style_axis(axes[0], "Price")
     _mobile_style_axis(axes[1], "Momentum")
     return _mobile_finalize_figure(fig)
 
 
-def build_mobile_market_trend_figure(market_data: dict[str, Any]) -> Any:
+def build_mobile_market_figure(market_data: dict[str, Any]) -> Any:
     plot_df = _mobile_view_slice(market_data["plot_df"]).copy()
-    fig, ax = plt.subplots(figsize=(6.4, 3.2), constrained_layout=True)
-    ax.plot(plot_df.index, plot_df["Score"], color="#0f766e", linewidth=1.8, label="Score")
-    ax.plot(plot_df.index, plot_df["Breadth"], color="#dd6b20", linewidth=1.1, label="Breadth")
-    ax.plot(plot_df.index, plot_df["Sector"], color="#2563eb", linewidth=1.1, label="Sector")
-    ax.plot(plot_df.index, plot_df["Credit"], color="#0f766e", linewidth=1.1, linestyle="--", label="Credit")
-    ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
-    _mobile_style_axis(ax, "Score")
+    latest_factors = market_data["latest_factors"]
+    normalized_spy = (plot_df["SPY"] / plot_df["SPY"].iloc[0]) - 1
+    fig, axes = plt.subplots(4, 1, figsize=(6.4, 10.0), constrained_layout=True, gridspec_kw={"height_ratios": [1.6, 1.3, 1.0, 1.3]})
+    _draw_mobile_gauge(axes[0], market_data["latest_score"] * 100, "Fear <-> Greed")
+    axes[1].plot(plot_df.index, plot_df["Score"], color="#0f766e", linewidth=1.8, label="Smart score")
+    axes[1].plot(plot_df.index, normalized_spy, color="#dd6b20", linewidth=1.2, linestyle="--", label="SPY return")
+    axes[1].axhline(0.8, color="#b42318", linestyle=":", linewidth=1)
+    axes[1].axhline(0.2, color="#0f766e", linestyle=":", linewidth=1)
+    axes[1].legend(loc="upper left", fontsize=8, frameon=False)
+    axes[2].bar(latest_factors.index.astype(str), latest_factors.values, color="#2563eb")
+    axes[2].tick_params(axis="x", rotation=25, labelsize=8)
+    axes[3].plot(plot_df.index, plot_df["Breadth"], color="#dd6b20", linewidth=1.2, label="Breadth")
+    axes[3].plot(plot_df.index, plot_df["Sector"], color="#2563eb", linewidth=1.2, label="Sector")
+    axes[3].plot(plot_df.index, plot_df["Credit"], color="#0f766e", linewidth=1.2, label="Credit")
+    axes[3].axhline(0.5, color="#64748b", linestyle=":", linewidth=1)
+    axes[3].legend(loc="upper left", fontsize=8, frameon=False, ncol=3)
+    _mobile_style_axis(axes[1], "Score")
+    _mobile_style_axis(axes[2], "Factor")
+    _mobile_style_axis(axes[3], "Health")
     return _mobile_finalize_figure(fig)
 
 
 def build_mobile_options_figure(options_data: dict[str, Any]) -> Any:
     view = options_data["strike_view"].copy()
-    fig, axes = plt.subplots(3, 1, figsize=(6.4, 7.4), constrained_layout=True, gridspec_kw={"height_ratios": [1.3, 1.3, 0.9]})
+    fig, axes = plt.subplots(6, 1, figsize=(6.4, 12.0), constrained_layout=True, gridspec_kw={"height_ratios": [1.15, 1.15, 1.0, 1.0, 0.9, 0.9]})
     axes[0].bar(view["strike"], view["gex"] / 1e9, color="#2563eb", width=12)
     axes[0].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1)
     axes[1].plot(view["strike"], view["pain"], color="#b42318", linewidth=1.8)
     axes[1].fill_between(view["strike"], view["pain"], color="#fee2e2", alpha=0.5)
     axes[1].axvline(options_data["max_pain"], color="#b42318", linestyle=":", linewidth=1)
-    score = float(options_data["put_call_ratio"]) * 50.0
-    score = max(0.0, min(100.0, score))
-    gauge = _build_mobile_gauge_figure(score)
-    plt.close(gauge)
-    axes[2].barh(["PCR"], [options_data["put_call_ratio"]], color="#102a43")
-    axes[2].set_xlim(0, 2)
-    axes[2].text(min(options_data["put_call_ratio"] + 0.03, 1.9), 0, f"{options_data['put_call_ratio']:.2f}", va="center", fontsize=9)
+    axes[2].bar(view["strike"], view["vanna"] / 1e9, color="#0f766e", width=12)
+    axes[2].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1)
+    axes[3].bar(view["strike"], view["charm"] / 1e6, color="#dd6b20", width=12)
+    axes[3].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1)
+    axes[4].plot(["9D", "30D", "3M"], [options_data["vix9d"], options_data["vix30d"], options_data["vix3m"]], color="#7c3aed", linewidth=1.8, marker="o")
+    score = max(0.0, min(100.0, float(options_data["put_call_ratio"]) * 50.0))
+    _draw_mobile_gauge(axes[5], score, f"PCR {options_data['put_call_ratio']:.2f}")
     _mobile_style_axis(axes[0], "GEX (B)")
     _mobile_style_axis(axes[1], "Pain")
-    _mobile_style_axis(axes[2], "PCR")
+    _mobile_style_axis(axes[2], "Vanna (B)")
+    _mobile_style_axis(axes[3], "Charm (M)")
+    _mobile_style_axis(axes[4], "VIX")
     return _mobile_finalize_figure(fig)
 
 
-def build_mobile_fed_watch_section_figure(fed_watch_data: dict[str, Any], section: str) -> Any:
+def build_mobile_fed_watch_figure(fed_watch_data: dict[str, Any]) -> Any:
     frame = fed_watch_data["frame"].copy()
     subset = [column for column in ["SOFR", "IORB_Combined", "WALCL", "TGA", "ON_RRP"] if column in frame.columns]
     if subset:
         frame = frame.dropna(how="all", subset=subset)
-    fig, ax = plt.subplots(figsize=(6.4, 2.8), constrained_layout=True)
-    if section == "Collateral Supply":
-        if _frame_has_data(frame, "FED_Treasuries"):
-            ax.plot(frame.index, frame["FED_Treasuries"], color="#b42318", linewidth=1.5, linestyle="--", label="Fed Treasuries")
-        if _frame_has_data(frame, "Bank_Treasuries"):
-            ax.plot(frame.index, frame["Bank_Treasuries"], color="#2563eb", linewidth=1.5, label="Bank Treasuries")
-        ax.legend(loc="upper left", fontsize=8, frameon=False)
-        _mobile_style_axis(ax, "Billions USD")
-    elif section == "Dealer Incentive":
-        if _frame_has_data(frame, "Spread_Carry"):
-            ax.plot(frame.index, frame["Spread_Carry"], color="#7f1d1d", linewidth=1.7)
-            ax.axhline(0, color="#64748b", linestyle=":", linewidth=1)
-        _mobile_style_axis(ax, "Spread (%)")
-    elif section == "Plumbing Stress":
-        if _frame_has_data(frame, "SOFR"):
-            ax.plot(frame.index, frame["SOFR"], color="#111827", linewidth=1.4, label="SOFR")
-        if _frame_has_data(frame, "IORB_Combined"):
-            ax.plot(frame.index, frame["IORB_Combined"], color="#b42318", linewidth=1.4, linestyle="--", label="IORB / IOER")
-        ax.legend(loc="upper left", fontsize=8, frameon=False)
-        _mobile_style_axis(ax, "Rate (%)")
-    elif section == "Funding Volume":
-        if _frame_has_data(frame, "SOFR_Vol"):
-            ax.plot(frame.index, frame["SOFR_Vol"], color="#7c3aed", linewidth=1.7)
-        _mobile_style_axis(ax, "Billions USD")
-    elif section == "Treasury and Fed Drains":
-        if _frame_has_data(frame, "TGA"):
-            ax.plot(frame.index, frame["TGA"], color="#dd6b20", linewidth=1.4, label="TGA")
-        if _frame_has_data(frame, "ON_RRP"):
-            ax.plot(frame.index, frame["ON_RRP"], color="#2563eb", linewidth=1.4, label="ON RRP")
-        if _frame_has_data(frame, "Reserves"):
-            ax.plot(frame.index, frame["Reserves"], color="#0f766e", linewidth=1.4, linestyle="--", label="Reserves")
-        ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
-        _mobile_style_axis(ax, "Billions USD")
-    elif section == "Traditional Curve":
-        if _frame_has_data(frame, "Spread_Curve"):
-            ax.plot(frame.index, frame["Spread_Curve"], color="#102a43", linewidth=1.7)
-            ax.axhline(0, color="#b42318", linestyle=":", linewidth=1)
-        _mobile_style_axis(ax, "Spread (%)")
+    fig, axes = plt.subplots(6, 1, figsize=(6.4, 13.0), constrained_layout=True)
+    if _frame_has_data(frame, "FED_Treasuries"):
+        axes[0].plot(frame.index, frame["FED_Treasuries"], color="#b42318", linewidth=1.5, linestyle="--", label="Fed Treasuries")
+    if _frame_has_data(frame, "Bank_Treasuries"):
+        axes[0].plot(frame.index, frame["Bank_Treasuries"], color="#2563eb", linewidth=1.5, label="Bank Treasuries")
+    axes[0].legend(loc="upper left", fontsize=8, frameon=False)
+
+    if _frame_has_data(frame, "Spread_Carry"):
+        carry = frame["Spread_Carry"]
+        axes[1].plot(frame.index, carry, color="#7f1d1d", linewidth=1.7)
+        axes[1].fill_between(frame.index, 0, carry, where=carry >= 0, color="#0f766e", alpha=0.18)
+        axes[1].fill_between(frame.index, 0, carry, where=carry < 0, color="#b42318", alpha=0.14)
+        axes[1].axhline(0, color="#64748b", linestyle=":", linewidth=1)
+
+    if _frame_has_data(frame, "SOFR"):
+        axes[2].plot(frame.index, frame["SOFR"], color="#111827", linewidth=1.4, label="SOFR")
+    if _frame_has_data(frame, "IORB_Combined"):
+        axes[2].plot(frame.index, frame["IORB_Combined"], color="#b42318", linewidth=1.4, linestyle="--", label="IORB / IOER")
+    if _frame_has_data(frame, "SOFR") and _frame_has_data(frame, "IORB_Combined"):
+        stress_mask = frame["SOFR"] > frame["IORB_Combined"]
+        if bool(stress_mask.fillna(False).any()):
+            axes[2].fill_between(
+                frame.index,
+                frame["IORB_Combined"],
+                frame["SOFR"],
+                where=stress_mask,
+                color="#b42318",
+                alpha=0.14,
+            )
+    axes[2].legend(loc="upper left", fontsize=8, frameon=False)
+
+    if _frame_has_data(frame, "SOFR_Vol"):
+        axes[3].plot(frame.index, frame["SOFR_Vol"], color="#7c3aed", linewidth=1.7)
+
+    if _frame_has_data(frame, "TGA"):
+        axes[4].plot(frame.index, frame["TGA"], color="#dd6b20", linewidth=1.4, label="TGA")
+    if _frame_has_data(frame, "ON_RRP"):
+        axes[4].plot(frame.index, frame["ON_RRP"], color="#2563eb", linewidth=1.4, label="ON RRP")
+    if _frame_has_data(frame, "Reserves"):
+        axes[4].plot(frame.index, frame["Reserves"], color="#0f766e", linewidth=1.4, linestyle="--", label="Reserves")
+    axes[4].legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
+
+    if _frame_has_data(frame, "Spread_Curve"):
+        curve = frame["Spread_Curve"]
+        axes[5].plot(frame.index, curve, color="#102a43", linewidth=1.7)
+        axes[5].fill_between(frame.index, 0, curve, where=curve < 0, color="#64748b", alpha=0.16)
+        axes[5].axhline(0, color="#b42318", linestyle=":", linewidth=1)
+
+    for axis, label in zip(
+        axes,
+        ["Billions USD", "Spread (%)", "Rate (%)", "Billions USD", "Billions USD", "Spread (%)"],
+    ):
+        _mobile_style_axis(axis, label)
     return _mobile_finalize_figure(fig)
 
 
@@ -2787,18 +2909,10 @@ def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
         unsafe_allow_html=True,
     )
     if mobile_charts_enabled():
-        for section_title in [
-            "Collateral Supply",
-            "Dealer Incentive",
-            "Plumbing Stress",
-            "Funding Volume",
-            "Treasury and Fed Drains",
-            "Traditional Curve",
-        ]:
-            st.markdown(f"#### {section_title}")
-            fig = build_mobile_fed_watch_section_figure(fed_watch_data, section_title)
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+        st.markdown("#### Fed Watch Liquidity Dashboard")
+        fig = build_mobile_fed_watch_figure(fed_watch_data)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
     else:
         render_plotly_chart(build_fed_watch_figure(fed_watch_data))
 
@@ -3928,14 +4042,10 @@ def main() -> None:
             st.info("Fear & Greed data could not be loaded from Yahoo Finance for the required macro basket.")
         else:
             if mobile_charts_enabled():
-                st.markdown("#### Macro Fear and Greed Gauge")
-                gauge_fig = _build_mobile_gauge_figure(market_data["latest_score"] * 100)
-                st.pyplot(gauge_fig, use_container_width=True)
-                plt.close(gauge_fig)
-                st.markdown("#### Internal Health Trend")
-                trend_fig = build_mobile_market_trend_figure(market_data)
-                st.pyplot(trend_fig, use_container_width=True)
-                plt.close(trend_fig)
+                st.markdown("#### Macro Fear and Greed Dashboard")
+                market_fig = build_mobile_market_figure(market_data)
+                st.pyplot(market_fig, use_container_width=True)
+                plt.close(market_fig)
             else:
                 render_plotly_chart(build_market_figure(market_data))
     elif active_view == "Options Flow":
