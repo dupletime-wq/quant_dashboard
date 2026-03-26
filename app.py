@@ -18,6 +18,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 from matplotlib.patches import Rectangle, Wedge
+from matplotlib.ticker import MaxNLocator
 try:
     from setuptools import _distutils as setuptools_distutils
     sys.modules.setdefault("distutils", setuptools_distutils)
@@ -466,7 +467,7 @@ def _mobile_finalize_figure(fig: Any) -> Any:
     return fig
 
 
-def _mobile_style_axis(axis: Any, ylabel: str | None = None) -> None:
+def _mobile_style_axis(axis: Any, ylabel: str | None = None, x_axis_type: str = "date") -> None:
     if ylabel:
         axis.set_ylabel(ylabel, fontsize=9)
     axis.grid(True, axis="y", alpha=0.22, color="#64748b")
@@ -474,9 +475,15 @@ def _mobile_style_axis(axis: Any, ylabel: str | None = None) -> None:
     axis.spines["right"].set_visible(False)
     axis.tick_params(axis="x", labelsize=8)
     axis.tick_params(axis="y", labelsize=8)
-    if hasattr(axis, "xaxis"):
+    if hasattr(axis, "xaxis") and x_axis_type == "date":
         axis.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=6))
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    elif hasattr(axis, "xaxis") and x_axis_type == "numeric":
+        axis.xaxis.set_major_locator(MaxNLocator(nbins=6))
+        try:
+            axis.ticklabel_format(axis="x", style="plain", useOffset=False)
+        except Exception:
+            pass
 
 
 def _mobile_add_candlesticks(axis: Any, df: pd.DataFrame, width_ratio: float = 0.65) -> None:
@@ -508,7 +515,17 @@ def _mobile_add_candlesticks(axis: Any, df: pd.DataFrame, width_ratio: float = 0
     axis.xaxis_date()
 
 
-def _draw_mobile_gauge(axis: Any, score_pct: float, subtitle: str) -> None:
+def _draw_mobile_gauge(
+    axis: Any,
+    score_pct: float,
+    subtitle: str,
+    *,
+    value_y: float = 0.18,
+    subtitle_y: float = -0.14,
+    needle_length: float = 0.74,
+    needle_width: float = 4.0,
+    value_size: float = 22,
+) -> None:
     segments = [
         (0, 20, "#dbeafe"),
         (20, 40, "#dcfce7"),
@@ -523,10 +540,31 @@ def _draw_mobile_gauge(axis: Any, score_pct: float, subtitle: str) -> None:
 
     score_pct = max(0.0, min(100.0, score_pct))
     theta = np.deg2rad(180 - (score_pct * 1.8))
-    axis.plot([0, np.cos(theta) * 0.74], [0, np.sin(theta) * 0.74], color="#102a43", linewidth=4, solid_capstyle="round")
+    axis.plot([0, np.cos(theta) * needle_length], [0, np.sin(theta) * needle_length], color="#102a43", linewidth=needle_width, solid_capstyle="round")
     axis.scatter([0], [0], color="#102a43", s=40, zorder=3)
-    axis.text(0, 0.18, f"{score_pct:.1f}", ha="center", va="center", fontsize=22, color="#102a43", fontweight="bold")
-    axis.text(0, -0.14, subtitle, ha="center", va="center", fontsize=10, color="#52606d")
+    axis.text(
+        0,
+        value_y,
+        f"{score_pct:.1f}",
+        ha="center",
+        va="center",
+        fontsize=value_size,
+        color="#102a43",
+        fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.14", facecolor=CHART_SURFACE_COLOR, edgecolor="none", alpha=0.98),
+        zorder=5,
+    )
+    axis.text(
+        0,
+        subtitle_y,
+        subtitle,
+        ha="center",
+        va="center",
+        fontsize=10,
+        color="#52606d",
+        bbox=dict(boxstyle="round,pad=0.08", facecolor=CHART_SURFACE_COLOR, edgecolor="none", alpha=0.96),
+        zorder=5,
+    )
     axis.set_xlim(-1.05, 1.05)
     axis.set_ylim(-0.08, 1.05)
     axis.set_aspect("equal")
@@ -1497,31 +1535,76 @@ def build_mobile_market_figure(market_data: dict[str, Any]) -> Any:
     axes[3].axhline(0.5, color="#64748b", linestyle=":", linewidth=1)
     axes[3].legend(loc="upper left", fontsize=8, frameon=False, ncol=3)
     _mobile_style_axis(axes[1], "Score")
-    _mobile_style_axis(axes[2], "Factor")
+    _mobile_style_axis(axes[2], "Factor", x_axis_type="category")
     _mobile_style_axis(axes[3], "Health")
     return _mobile_finalize_figure(fig)
 
 
+def estimate_zero_gamma_level(strike_view: pd.DataFrame, spot: float | None = None) -> float:
+    if strike_view is None or strike_view.empty:
+        return np.nan
+    if "strike" not in strike_view.columns or "gex" not in strike_view.columns:
+        return np.nan
+
+    view = strike_view[["strike", "gex"]].dropna().sort_values("strike")
+    if view.shape[0] < 2:
+        return np.nan
+
+    strikes = view["strike"].to_numpy(dtype=float)
+    gex_values = view["gex"].to_numpy(dtype=float)
+    candidates: list[float] = [float(level) for level in strikes[np.isclose(gex_values, 0.0)]]
+
+    for idx in range(1, len(strikes)):
+        prev_gex = gex_values[idx - 1]
+        curr_gex = gex_values[idx]
+        if np.isnan(prev_gex) or np.isnan(curr_gex) or prev_gex == 0 or curr_gex == 0:
+            continue
+        if np.sign(prev_gex) != np.sign(curr_gex):
+            level = strikes[idx - 1] + ((0.0 - prev_gex) * (strikes[idx] - strikes[idx - 1]) / (curr_gex - prev_gex))
+            candidates.append(float(level))
+
+    if not candidates:
+        return np.nan
+
+    anchor = float(spot) if spot is not None and not np.isnan(spot) else float(np.median(strikes))
+    return float(min(candidates, key=lambda value: abs(value - anchor)))
+
+
 def build_mobile_options_figure(options_data: dict[str, Any]) -> Any:
     view = options_data["strike_view"].copy()
+    strike_step = float(view["strike"].diff().dropna().median()) if view.shape[0] > 1 else 5.0
+    bar_width = max(strike_step * 0.8, 1.0)
+    zero_gamma_level = float(options_data.get("zero_gamma_level", np.nan))
     fig, axes = plt.subplots(6, 1, figsize=(6.4, 12.0), constrained_layout=True, gridspec_kw={"height_ratios": [1.15, 1.15, 1.0, 1.0, 0.9, 0.9]})
-    axes[0].bar(view["strike"], view["gex"] / 1e9, color="#2563eb", width=12)
-    axes[0].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1)
+    axes[0].bar(view["strike"], view["gex"] / 1e9, color="#2563eb", width=bar_width, label="Net GEX")
+    axes[0].axhline(0, color="#64748b", linestyle=":", linewidth=1)
+    axes[0].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1.1, label="Spot")
+    if not np.isnan(zero_gamma_level):
+        axes[0].axvline(zero_gamma_level, color="#7c3aed", linestyle="--", linewidth=1.2, label="Zero Gamma")
+        axes[1].axvline(zero_gamma_level, color="#7c3aed", linestyle="--", linewidth=1.1)
+        axes[2].axvline(zero_gamma_level, color="#7c3aed", linestyle="--", linewidth=1.1)
+        axes[3].axvline(zero_gamma_level, color="#7c3aed", linestyle="--", linewidth=1.1)
+        axes[0].text(0.98, 0.94, f"Zero Gamma {zero_gamma_level:,.1f}", transform=axes[0].transAxes, ha="right", va="top", fontsize=8, color="#7c3aed")
     axes[1].plot(view["strike"], view["pain"], color="#b42318", linewidth=1.8)
     axes[1].fill_between(view["strike"], view["pain"], color="#fee2e2", alpha=0.5)
     axes[1].axvline(options_data["max_pain"], color="#b42318", linestyle=":", linewidth=1)
-    axes[2].bar(view["strike"], view["vanna"] / 1e9, color="#0f766e", width=12)
+    axes[2].bar(view["strike"], view["vanna"] / 1e9, color="#0f766e", width=bar_width)
+    axes[2].axhline(0, color="#64748b", linestyle=":", linewidth=1)
     axes[2].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1)
-    axes[3].bar(view["strike"], view["charm"] / 1e6, color="#dd6b20", width=12)
+    axes[3].bar(view["strike"], view["charm"] / 1e6, color="#dd6b20", width=bar_width)
+    axes[3].axhline(0, color="#64748b", linestyle=":", linewidth=1)
     axes[3].axvline(options_data["spot"], color="#64748b", linestyle=":", linewidth=1)
     axes[4].plot(["9D", "30D", "3M"], [options_data["vix9d"], options_data["vix30d"], options_data["vix3m"]], color="#7c3aed", linewidth=1.8, marker="o")
     score = max(0.0, min(100.0, float(options_data["put_call_ratio"]) * 50.0))
-    _draw_mobile_gauge(axes[5], score, f"PCR {options_data['put_call_ratio']:.2f}")
-    _mobile_style_axis(axes[0], "GEX (B)")
-    _mobile_style_axis(axes[1], "Pain")
-    _mobile_style_axis(axes[2], "Vanna (B)")
-    _mobile_style_axis(axes[3], "Charm (M)")
-    _mobile_style_axis(axes[4], "VIX")
+    _draw_mobile_gauge(axes[5], score, f"PCR {options_data['put_call_ratio']:.2f}", value_y=0.14, subtitle_y=-0.18, needle_length=0.64, needle_width=3.2, value_size=20)
+    for axis in axes[:4]:
+        axis.set_xlim(options_data["lower_bound"], options_data["upper_bound"])
+    axes[0].legend(loc="upper left", fontsize=8, frameon=False, ncol=3)
+    _mobile_style_axis(axes[0], "GEX (B)", x_axis_type="numeric")
+    _mobile_style_axis(axes[1], "Pain", x_axis_type="numeric")
+    _mobile_style_axis(axes[2], "Vanna (B)", x_axis_type="numeric")
+    _mobile_style_axis(axes[3], "Charm (M)", x_axis_type="numeric")
+    _mobile_style_axis(axes[4], "VIX", x_axis_type="category")
     return _mobile_finalize_figure(fig)
 
 
@@ -1592,7 +1675,7 @@ def build_mobile_canary_attack_figure(df_assets: pd.DataFrame, top_n: int = 6) -
     colors = ["#0f766e" if (not pd.isna(v) and v >= 0) else "#b42318" for v in view["실시간 평균 모멘텀(%)"]]
     ax.barh(view["자산"], view["실시간 평균 모멘텀(%)"], color=colors)
     ax.axvline(0, color="#64748b", linestyle=":", linewidth=1)
-    _mobile_style_axis(ax, "Momentum (%)")
+    _mobile_style_axis(ax, "Momentum (%)", x_axis_type="numeric")
     return _mobile_finalize_figure(fig)
 
 
@@ -1603,7 +1686,7 @@ def build_mobile_etf_sortino_figure(leaderboard: pd.DataFrame, top_n: int = 10) 
     colors = ["#0f766e" if not np.isnan(value) and value >= 0 else "#b42318" for value in view["Sortino"]]
     ax.barh(labels, view["Sortino"], color=colors)
     ax.axvline(0, color="#64748b", linestyle=":", linewidth=1)
-    _mobile_style_axis(ax, "Sortino")
+    _mobile_style_axis(ax, "Sortino", x_axis_type="numeric")
     return _mobile_finalize_figure(fig)
 
 
@@ -1611,7 +1694,7 @@ def build_mobile_etf_sector_share_figure(sector_df: pd.DataFrame, top_n: int = 8
     view = sector_df.head(top_n).copy().sort_values("Share", ascending=True)
     fig, ax = plt.subplots(figsize=(6.4, 3.6), constrained_layout=True)
     ax.barh(_mobile_shorten_labels(view["Sector"].astype(str).tolist()), view["Share"], color="#2563eb")
-    _mobile_style_axis(ax, "Share")
+    _mobile_style_axis(ax, "Share", x_axis_type="numeric")
     return _mobile_finalize_figure(fig)
 
 
@@ -3553,9 +3636,17 @@ def compute_options_analytics(
 
     strike_view = pd.DataFrame.from_dict(strike_map, orient="index").reset_index().rename(columns={"index": "strike"})
     strike_view = strike_view.sort_values("strike")
+    zero_gamma_level = estimate_zero_gamma_level(strike_view, spot)
+
+    lower_bound = float(spot * (1 - spot_range_pct))
+    upper_bound = float(spot * (1 + spot_range_pct))
+    if not np.isnan(zero_gamma_level) and spot > 0 and abs((zero_gamma_level / spot) - 1) <= 0.25:
+        lower_bound = min(lower_bound, float(zero_gamma_level * 0.995))
+        upper_bound = max(upper_bound, float(zero_gamma_level * 1.005))
+
     strike_view = strike_view[
-        (strike_view["strike"] >= spot * (1 - spot_range_pct))
-        & (strike_view["strike"] <= spot * (1 + spot_range_pct))
+        (strike_view["strike"] >= lower_bound)
+        & (strike_view["strike"] <= upper_bound)
     ].copy()
     if strike_view.empty:
         return None
@@ -3577,14 +3668,15 @@ def compute_options_analytics(
         "strike_view": strike_view,
         "put_call_ratio": put_call_ratio,
         "max_pain": max_pain,
+        "zero_gamma_level": zero_gamma_level,
         "net_gex": float(strike_view["gex"].sum()),
         "net_vanna": float(strike_view["vanna"].sum()),
         "net_charm": float(strike_view["charm"].sum()),
         "vix9d": vix_data["vix9d"],
         "vix30d": vix_data["vix30d"],
         "vix3m": vix_data["vix3m"],
-        "lower_bound": float(spot * (1 - spot_range_pct)),
-        "upper_bound": float(spot * (1 + spot_range_pct)),
+        "lower_bound": lower_bound,
+        "upper_bound": upper_bound,
     }
 
 
@@ -3602,6 +3694,7 @@ def options_signal_label(options_data: dict[str, Any] | None) -> tuple[str, str]
 
 def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure:
     view = options_data["strike_view"]
+    zero_gamma_level = float(options_data.get("zero_gamma_level", np.nan))
     fig = make_subplots(
         rows=3,
         cols=2,
@@ -3647,6 +3740,17 @@ def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure
             yref=yref,
             line=dict(color="#64748b", width=1, dash="dash"),
         )
+        if not np.isnan(zero_gamma_level):
+            fig.add_shape(
+                type="line",
+                x0=zero_gamma_level,
+                x1=zero_gamma_level,
+                y0=0,
+                y1=1,
+                xref=xref,
+                yref=yref,
+                line=dict(color="#7c3aed", width=1.2, dash="dot"),
+            )
     for row, col in [(1, 1), (1, 2), (2, 1), (2, 2)]:
         fig.update_xaxes(range=[options_data["lower_bound"], options_data["upper_bound"]], row=row, col=col)
 
@@ -3660,6 +3764,19 @@ def build_options_figure(options_data: dict[str, Any], spot: float) -> go.Figure
         yref="y2 domain",
         line=dict(color="#b42318", width=1, dash="dot"),
     )
+    if not np.isnan(zero_gamma_level):
+        fig.add_annotation(
+            x=zero_gamma_level,
+            y=1.02,
+            xref="x",
+            yref="y domain",
+            text="Zero Gamma",
+            showarrow=False,
+            font=dict(color="#7c3aed", size=10),
+            bgcolor="rgba(255,255,255,0.92)",
+            bordercolor="#7c3aed",
+            borderwidth=1,
+        )
     return apply_figure_style(fig, title=f"SPX Options Positioning ({options_data['expiry']})", height=970, showlegend=False)
 
 
@@ -4058,7 +4175,24 @@ def main() -> None:
         if not options_data:
             st.info("SPX option data could not be loaded from the CBOE delayed quotes feed.")
         else:
-            option_cards = st.columns(4)
+            zero_gamma_level = float(options_data.get("zero_gamma_level", np.nan))
+            zero_gamma_value = "n/a" if np.isnan(zero_gamma_level) else f"{zero_gamma_level:,.1f}"
+            zero_gamma_subtitle = (
+                "No gamma sign change found"
+                if np.isnan(zero_gamma_level)
+                else "Spot above gamma flip"
+                if options_data["spot"] >= zero_gamma_level
+                else "Spot below gamma flip"
+            )
+            zero_gamma_tone = (
+                "neutral"
+                if np.isnan(zero_gamma_level)
+                else "bull"
+                if options_data["spot"] >= zero_gamma_level
+                else "bear"
+            )
+
+            option_cards = st.columns(5)
             with option_cards[0]:
                 render_metric_card("Underlying", f"{options_data['underlying']} {options_data['spot']:,.1f}", options_data["expiry"], "neutral")
             with option_cards[1]:
@@ -4067,6 +4201,8 @@ def main() -> None:
                 render_metric_card("Max Pain", f"{options_data['max_pain']:.2f}", "Strike with minimum aggregate pain", "neutral")
             with option_cards[3]:
                 render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e9:,.2f}B", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
+            with option_cards[4]:
+                render_metric_card("Zero Gamma", zero_gamma_value, zero_gamma_subtitle, zero_gamma_tone)
             render_chart(
                 f"SPX Options Positioning ({options_data['expiry']})",
                 build_options_figure(options_data, options_data["spot"]),
