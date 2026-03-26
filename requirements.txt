@@ -9,3 +9,4 @@ statsmodels>=0.14
 finance-datareader>=0.9.96
 setuptools>=68
 pandas-datareader==0.10.0
+matplotlib
