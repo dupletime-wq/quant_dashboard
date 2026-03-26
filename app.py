@@ -1366,7 +1366,7 @@ def build_mobile_stl_figure(df: pd.DataFrame) -> Any:
         s=12,
         zorder=3,
     )
-    axes[0].plot(view.index, view["Close"], color="rgba(15,23,42,0.18)", linewidth=0.7, alpha=0.35)
+    axes[0].plot(view.index, view["Close"], color="#102a43", linewidth=0.7, alpha=0.18)
     axes[0].plot(view.index, view["Trend"], color="#0f766e", linewidth=1.3, label="Trend")
     axes[0].legend(loc="upper left", fontsize=8, frameon=False)
     axes[1].plot(view.index, view["Cycle_Score"], color="#f59e0b", linewidth=1.5)
