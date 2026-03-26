@@ -456,7 +456,13 @@ def _mobile_view_slice(data: pd.DataFrame | pd.Series, *, pad_days: int = 0) -> 
 
 
 def _mobile_finalize_figure(fig: Any) -> Any:
-    fig.tight_layout(pad=1.2)
+    get_layout_engine = getattr(fig, "get_layout_engine", None)
+    if callable(get_layout_engine) and get_layout_engine() is not None:
+        return fig
+    try:
+        fig.tight_layout(pad=1.2)
+    except RuntimeError:
+        pass
     return fig
 
 
