@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import StringIO
+import json
 import os
 import pickle
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 from typing import Any
 
 import FinanceDataReader as fdr
@@ -893,31 +895,101 @@ def _download_fred_pdr_batch_series(
     start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> tuple[dict[str, pd.Series], dict[str, str], dict[str, str]]:
-    try:
-        import pandas_datareader.data as pdr_web
-    except Exception as exc:
-        error_text = f"pandas_datareader import failed: {exc}"
-        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
-
     fred_codes = [str(spec["fred"]) for spec in FED_WATCH_SERIES_SPECS.values()]
     code_to_alias = {str(spec["fred"]): alias for alias, spec in FED_WATCH_SERIES_SPECS.items()}
     loaded_series: dict[str, pd.Series] = {}
     source_labels: dict[str, str] = {}
     errors: dict[str, str] = {}
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(pdr_web.DataReader, fred_codes, "fred", start.to_pydatetime(), end.to_pydatetime())
+    worker_code = """
+import json
+import sys
+import warnings
+from io import StringIO
+
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+codes = sys.argv[1].split(",")
+start = pd.Timestamp(sys.argv[2]).to_pydatetime()
+end = pd.Timestamp(sys.argv[3]).to_pydatetime()
+
+try:
+    import pandas_datareader.data as pdr_web
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": f"pandas_datareader import failed: {exc}"}))
+    raise SystemExit(0)
+
+try:
+    frame = pdr_web.DataReader(codes, "fred", start, end)
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": f"pandas_datareader batch request failed: {exc}"}))
+    raise SystemExit(0)
+
+if frame is None or frame.empty:
+    print(json.dumps({"ok": False, "error": "pandas_datareader batch FRED response was empty"}))
+else:
+    print(json.dumps({"ok": True, "frame": frame.to_json(orient="split", date_format="iso")}))
+"""
+
     try:
-        frame = future.result(timeout=FRED_PDR_BATCH_TIMEOUT_SECONDS)
-    except FuturesTimeoutError:
-        future.cancel()
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                worker_code,
+                ",".join(fred_codes),
+                pd.Timestamp(start).strftime("%Y-%m-%d"),
+                pd.Timestamp(end).strftime("%Y-%m-%d"),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=FRED_PDR_BATCH_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
         error_text = f"pandas_datareader batch request timed out after {FRED_PDR_BATCH_TIMEOUT_SECONDS}s"
         return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
     except Exception as exc:
-        error_text = f"pandas_datareader batch request failed: {exc}"
+        error_text = f"pandas_datareader subprocess failed: {exc}"
         return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+
+    stdout_lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    payload: dict[str, Any] | None = None
+    for line in reversed(stdout_lines):
+        try:
+            candidate = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(candidate, dict) and "ok" in candidate:
+            payload = candidate
+            break
+
+    if payload is None:
+        stderr_text = (completed.stderr or "").strip()
+        if completed.returncode != 0 and stderr_text:
+            error_text = f"pandas_datareader subprocess failed: {stderr_text}"
+        else:
+            error_text = "pandas_datareader subprocess returned no usable payload"
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
+
+    if not bool(payload.get("ok")):
+        error_text = str(payload.get("error") or "pandas_datareader batch request failed")
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
+
+    frame_json = payload.get("frame")
+    if not isinstance(frame_json, str) or not frame_json.strip():
+        error_text = "pandas_datareader subprocess returned an empty frame payload"
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
+
+    try:
+        frame = pd.read_json(StringIO(frame_json), orient="split")
+    except Exception as exc:
+        error_text = f"pandas_datareader frame parse failed: {exc}"
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
 
     if frame is None or frame.empty:
         error_text = "pandas_datareader batch FRED response was empty"
