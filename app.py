@@ -79,8 +79,8 @@ FED_WATCH_SERIES_SPECS = {
 FRED_GRAPH_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FRED_REQUEST_TIMEOUT_SECONDS = 20
 FRED_CURL_TIMEOUT_SECONDS = 20
-FRED_CSV_MAX_WORKERS = 4
-FED_WATCH_CACHE_VERSION = 2
+FRED_CSV_MAX_WORKERS = 1
+FED_WATCH_CACHE_VERSION = 4
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
 
 
@@ -784,8 +784,15 @@ def _download_fred_csv_text_via_curl(params: dict[str, str]) -> tuple[str | None
             "--silent",
             "--show-error",
             "--location",
+            "--http1.1",
+            "--connect-timeout",
+            "8",
             "--max-time",
             str(FRED_CURL_TIMEOUT_SECONDS),
+            "--retry",
+            "2",
+            "--retry-delay",
+            "1",
             "-H",
             "User-Agent: Mozilla/5.0",
             _fred_request_url(params),
@@ -829,24 +836,14 @@ def _download_single_fred_csv_series(
     }
 
     source_label = "Live FRED CSV"
-    if os.name == "nt":
-        response_text, primary_error = _download_fred_csv_text_via_curl(params)
+    response_text, primary_error = _download_fred_csv_text_via_curl(params)
+    if response_text is None:
+        response_text, fallback_error = _download_fred_csv_text_via_requests(params)
         if response_text is None:
-            response_text, fallback_error = _download_fred_csv_text_via_requests(params)
-            if response_text is None:
-                detail = primary_error or "curl failed"
-                if fallback_error and fallback_error != detail:
-                    detail = f"curl failed: {detail}; requests fallback failed: {fallback_error}"
-                return alias, None, None, detail
-    else:
-        response_text, primary_error = _download_fred_csv_text_via_requests(params)
-        if response_text is None:
-            response_text, fallback_error = _download_fred_csv_text_via_curl(params)
-            if response_text is None:
-                detail = primary_error or "requests failed"
-                if fallback_error and fallback_error != detail:
-                    detail = f"requests failed: {detail}; curl fallback failed: {fallback_error}"
-                return alias, None, None, detail
+            detail = primary_error or "curl failed"
+            if fallback_error and fallback_error != detail:
+                detail = f"curl failed: {detail}; requests fallback failed: {fallback_error}"
+            return alias, None, None, detail
 
     try:
         frame = pd.read_csv(StringIO(response_text))
@@ -889,6 +886,49 @@ def _download_single_fred_csv_series(
     return alias, series, source_label, None
 
 
+def _download_fred_pdr_batch_series(
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[dict[str, pd.Series], dict[str, str], dict[str, str]]:
+    try:
+        import pandas_datareader.data as pdr_web
+    except Exception as exc:
+        error_text = f"pandas_datareader import failed: {exc}"
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
+
+    fred_codes = [str(spec["fred"]) for spec in FED_WATCH_SERIES_SPECS.values()]
+    code_to_alias = {str(spec["fred"]): alias for alias, spec in FED_WATCH_SERIES_SPECS.items()}
+    loaded_series: dict[str, pd.Series] = {}
+    source_labels: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    try:
+        frame = pdr_web.DataReader(fred_codes, "fred", start.to_pydatetime(), end.to_pydatetime())
+    except Exception as exc:
+        error_text = f"pandas_datareader batch request failed: {exc}"
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
+
+    if frame is None or frame.empty:
+        error_text = "pandas_datareader batch FRED response was empty"
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
+
+    frame.index = normalize_datetime_index(frame.index)
+    frame = frame.sort_index()
+    for fred_code, alias in code_to_alias.items():
+        if fred_code not in frame.columns:
+            errors[alias] = f"pandas_datareader batch response omitted {fred_code}"
+            continue
+        scaled = pd.to_numeric(frame[fred_code], errors="coerce").dropna()
+        if scaled.empty:
+            errors[alias] = f"pandas_datareader returned no usable rows for {fred_code}"
+            continue
+        scaled = scaled * float(FED_WATCH_SERIES_SPECS[alias]["scale"])
+        scaled.name = alias
+        loaded_series[alias] = scaled
+        source_labels[alias] = "Live batch FRED"
+    return loaded_series, source_labels, errors
+
+
 def _download_fred_live_series(
     aliases: list[str],
     start: pd.Timestamp,
@@ -925,7 +965,22 @@ def _download_fred_batch_series(
     start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> tuple[dict[str, pd.Series], dict[str, str], dict[str, str]]:
-    loaded_series, source_labels, errors = _download_fred_live_series(list(FED_WATCH_SERIES_SPECS.keys()), start, end)
+    loaded_series, source_labels, errors = _download_fred_pdr_batch_series(start, end)
+    missing_aliases = [alias for alias in FED_WATCH_SERIES_SPECS if alias not in loaded_series]
+    if not missing_aliases:
+        return loaded_series, source_labels, errors
+
+    fallback_series, fallback_sources, fallback_errors = _download_fred_live_series(missing_aliases, start, end)
+    for alias, series in fallback_series.items():
+        loaded_series[alias] = series
+        source_labels[alias] = fallback_sources.get(alias, "Live FRED CSV")
+        errors.pop(alias, None)
+    for alias, error in fallback_errors.items():
+        prior_error = errors.get(alias)
+        if prior_error and prior_error != error:
+            errors[alias] = f"{prior_error}; direct FRED CSV fallback failed: {error}"
+        else:
+            errors[alias] = error
     return loaded_series, source_labels, errors
 
 
