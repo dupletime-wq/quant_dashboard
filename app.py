@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import StringIO
@@ -77,10 +77,11 @@ FED_WATCH_SERIES_SPECS = {
     "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
 }
 FRED_GRAPH_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
-FRED_REQUEST_TIMEOUT_SECONDS = 20
-FRED_CURL_TIMEOUT_SECONDS = 20
-FRED_CSV_MAX_WORKERS = 1
-FED_WATCH_CACHE_VERSION = 4
+FRED_REQUEST_TIMEOUT_SECONDS = 8
+FRED_CURL_TIMEOUT_SECONDS = 12
+FRED_PDR_BATCH_TIMEOUT_SECONDS = 12
+FRED_CSV_MAX_WORKERS = 3
+FED_WATCH_CACHE_VERSION = 5
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
 
 
@@ -838,6 +839,8 @@ def _download_single_fred_csv_series(
     source_label = "Live FRED CSV"
     response_text, primary_error = _download_fred_csv_text_via_curl(params)
     if response_text is None:
+        if os.name == "nt":
+            return alias, None, None, primary_error or "curl failed"
         response_text, fallback_error = _download_fred_csv_text_via_requests(params)
         if response_text is None:
             detail = primary_error or "curl failed"
@@ -902,11 +905,19 @@ def _download_fred_pdr_batch_series(
     source_labels: dict[str, str] = {}
     errors: dict[str, str] = {}
 
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(pdr_web.DataReader, fred_codes, "fred", start.to_pydatetime(), end.to_pydatetime())
     try:
-        frame = pdr_web.DataReader(fred_codes, "fred", start.to_pydatetime(), end.to_pydatetime())
+        frame = future.result(timeout=FRED_PDR_BATCH_TIMEOUT_SECONDS)
+    except FuturesTimeoutError:
+        future.cancel()
+        error_text = f"pandas_datareader batch request timed out after {FRED_PDR_BATCH_TIMEOUT_SECONDS}s"
+        return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
     except Exception as exc:
         error_text = f"pandas_datareader batch request failed: {exc}"
         return {}, {}, {alias: error_text for alias in FED_WATCH_SERIES_SPECS}
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     if frame is None or frame.empty:
         error_text = "pandas_datareader batch FRED response was empty"
