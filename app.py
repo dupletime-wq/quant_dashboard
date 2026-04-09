@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from io import StringIO
 import pickle
 from pathlib import Path
 import re
@@ -85,6 +87,9 @@ FED_WATCH_SERIES_SPECS = {
     "Reserves": {"fred": "WRESBAL", "scale": 0.001, "unit": "billions"},
     "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
 }
+FRED_GRAPH_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+FRED_CSV_TIMEOUT_SECONDS = 12
+FRED_CSV_MAX_WORKERS = 4
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
 
 
@@ -749,33 +754,160 @@ def _normalize_fed_watch_series(
     return clean, aligned, latest_date
 
 
-def _download_fred_batch_series(start: pd.Timestamp, end: pd.Timestamp) -> tuple[dict[str, pd.Series], str | None]:
-    if pdr_web is None:
-        detail = f": {PDR_IMPORT_ERROR}" if PDR_IMPORT_ERROR else ""
-        return {}, f"pandas_datareader import failed{detail}"
-
-    fred_codes = [str(spec["fred"]) for spec in FED_WATCH_SERIES_SPECS.values()]
-    code_to_alias = {str(spec["fred"]): alias for alias, spec in FED_WATCH_SERIES_SPECS.items()}
+def _download_single_fred_csv_series(
+    alias: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[str, pd.Series | None, str | None]:
+    series_id = str(FED_WATCH_SERIES_SPECS[alias]["fred"])
+    params = {
+        "id": series_id,
+        "cosd": pd.Timestamp(start).strftime("%Y-%m-%d"),
+        "coed": pd.Timestamp(end).strftime("%Y-%m-%d"),
+    }
 
     try:
-        frame = pdr_web.DataReader(fred_codes, "fred", start, end)
+        response = requests.get(
+            FRED_GRAPH_CSV_URL,
+            params=params,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=FRED_CSV_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        frame = pd.read_csv(StringIO(response.text))
+    except requests.Timeout:
+        return alias, None, f"request timed out after {FRED_CSV_TIMEOUT_SECONDS}s"
+    except requests.RequestException as exc:
+        return alias, None, str(exc)
+    except pd.errors.EmptyDataError:
+        return alias, None, "CSV response was empty"
     except Exception as exc:
-        return {}, str(exc)
+        return alias, None, str(exc)
 
-    if frame is None or frame.empty:
-        return {}, "batch FRED response was empty"
+    if frame.empty:
+        return alias, None, "CSV response was empty"
 
-    frame.index = normalize_datetime_index(frame.index)
-    frame = frame.sort_index()
-    batch_series: dict[str, pd.Series] = {}
-    for fred_code, alias in code_to_alias.items():
-        if fred_code not in frame.columns:
+    date_column = next(
+        (
+            column
+            for column in frame.columns
+            if str(column).strip().lower() in {"date", "observation_date"}
+        ),
+        None,
+    )
+    if date_column is None:
+        return alias, None, "CSV response was missing the date column"
+
+    value_columns = [column for column in frame.columns if column != date_column]
+    if not value_columns:
+        return alias, None, "CSV response was missing a value column"
+
+    index = pd.to_datetime(frame[date_column], errors="coerce")
+    values = pd.to_numeric(frame[value_columns[-1]], errors="coerce")
+    valid_mask = index.notna() & values.notna()
+    if not valid_mask.any():
+        return alias, None, "CSV response returned no usable rows"
+
+    series = pd.Series(values.loc[valid_mask].to_numpy(), index=index.loc[valid_mask], name=alias)
+    series.index = normalize_datetime_index(series.index)
+    series = series.sort_index()
+    series = series[~series.index.duplicated(keep="last")]
+    series = series * float(FED_WATCH_SERIES_SPECS[alias]["scale"])
+    if series.empty:
+        return alias, None, "CSV response returned no usable rows"
+    return alias, series, None
+
+
+def _download_fred_csv_fallback_series(
+    aliases: list[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[dict[str, pd.Series], dict[str, str]]:
+    if not aliases:
+        return {}, {}
+
+    loaded_series: dict[str, pd.Series] = {}
+    errors: dict[str, str] = {}
+    max_workers = max(1, min(FRED_CSV_MAX_WORKERS, len(aliases)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(_download_single_fred_csv_series, alias, start, end): alias
+            for alias in aliases
+        }
+        for future in as_completed(future_map):
+            alias = future_map[future]
+            try:
+                result_alias, series, error = future.result()
+            except Exception as exc:
+                errors[alias] = str(exc)
+                continue
+            if series is None:
+                errors[result_alias] = error or "CSV fallback returned no usable rows"
+                continue
+            loaded_series[result_alias] = series
+    return loaded_series, errors
+
+
+def _download_fred_batch_series(
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[dict[str, pd.Series], dict[str, str], dict[str, str]]:
+    fred_codes = [str(spec["fred"]) for spec in FED_WATCH_SERIES_SPECS.values()]
+    code_to_alias = {str(spec["fred"]): alias for alias, spec in FED_WATCH_SERIES_SPECS.items()}
+    loaded_series: dict[str, pd.Series] = {}
+    source_labels: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    if pdr_web is None:
+        detail = f": {PDR_IMPORT_ERROR}" if PDR_IMPORT_ERROR else ""
+        pdr_error = f"pandas_datareader import failed{detail}"
+        errors = {alias: pdr_error for alias in FED_WATCH_SERIES_SPECS}
+    else:
+        try:
+            frame = pdr_web.DataReader(fred_codes, "fred", start, end)
+        except Exception as exc:
+            pdr_error = f"pandas_datareader batch request failed: {exc}"
+            errors = {alias: pdr_error for alias in FED_WATCH_SERIES_SPECS}
+        else:
+            if frame is None or frame.empty:
+                pdr_error = "pandas_datareader batch FRED response was empty"
+                errors = {alias: pdr_error for alias in FED_WATCH_SERIES_SPECS}
+            else:
+                frame.index = normalize_datetime_index(frame.index)
+                frame = frame.sort_index()
+                for fred_code, alias in code_to_alias.items():
+                    if fred_code not in frame.columns:
+                        errors[alias] = f"pandas_datareader batch response omitted {fred_code}"
+                        continue
+                    scaled = pd.to_numeric(frame[fred_code], errors="coerce").dropna()
+                    if scaled.empty:
+                        errors[alias] = f"pandas_datareader returned no usable rows for {fred_code}"
+                        continue
+                    scaled = scaled * float(FED_WATCH_SERIES_SPECS[alias]["scale"])
+                    scaled.name = alias
+                    loaded_series[alias] = scaled
+                    source_labels[alias] = "Live batch FRED"
+
+    missing_aliases = [alias for alias in FED_WATCH_SERIES_SPECS if alias not in loaded_series]
+    fallback_series, fallback_errors = _download_fred_csv_fallback_series(missing_aliases, start, end)
+    for alias, series in fallback_series.items():
+        loaded_series[alias] = series
+        source_labels[alias] = "Live FRED CSV"
+        errors.pop(alias, None)
+
+    for alias in missing_aliases:
+        if alias in fallback_series:
             continue
-        scaled = pd.to_numeric(frame[fred_code], errors="coerce").dropna() * float(FED_WATCH_SERIES_SPECS[alias]["scale"])
-        scaled.name = alias
-        if not scaled.empty:
-            batch_series[alias] = scaled
-    return batch_series, None
+        fallback_error = fallback_errors.get(alias)
+        if not fallback_error:
+            continue
+        prior_error = errors.get(alias)
+        if prior_error and prior_error != fallback_error:
+            errors[alias] = f"{prior_error}; direct FRED CSV fallback failed: {fallback_error}"
+        else:
+            errors[alias] = fallback_error
+
+    return loaded_series, source_labels, errors
 
 
 def _load_cached_fed_watch_series(cached_payload: dict[str, Any] | None, alias: str) -> pd.Series:
@@ -819,17 +951,14 @@ def _build_fed_watch_payload(
     latest_dates: dict[str, pd.Timestamp] = {}
     raw_series: dict[str, pd.Series] = {}
     stale_fallback_count = 0
-    live_series: dict[str, pd.Series] = {}
-    batch_series, batch_error = _download_fred_batch_series(start, end)
-    live_series.update(batch_series)
-    if batch_error:
-        warnings_list.append(f"Batch FRED request failed: {batch_error}")
+    live_series, source_labels, live_errors = _download_fred_batch_series(start, end)
 
     for alias, spec in FED_WATCH_SERIES_SPECS.items():
         series_id = str(spec["fred"])
-        source_label = "Live"
+        source_label = source_labels.get(alias, "Live")
         status_label = "OK"
         warning_text = ""
+        live_error = live_errors.get(alias)
 
         preferred_series = live_series.get(alias)
         clean, aligned, latest_date = _normalize_fed_watch_series(
@@ -845,16 +974,19 @@ def _build_fed_watch_payload(
                 source_label = f"Cache {cached_date}" if cached_date else "Stale cache"
                 status_label = "Stale fallback"
                 stale_fallback_count += 1
-                if batch_error:
-                    warning_text = f"{alias} ({series_id}) was unavailable from batch FRED download. Using cached series from {cached_date or 'a previous run'}."
+                if live_error:
+                    warning_text = (
+                        f"{alias} ({series_id}) was unavailable from live FRED download. "
+                        f"Using cached series from {cached_date or 'a previous run'}."
+                    )
                 else:
                     warning_text = f"{alias} ({series_id}) returned no usable live rows. Using cached series from {cached_date or 'a previous run'}."
             else:
                 frame[alias] = np.nan
-                status_label = "Failed" if batch_error else "Empty"
+                status_label = "Failed" if live_error else "Empty"
                 warning_text = (
-                    f"{alias} ({series_id}) failed to load from batch FRED download: {batch_error}"
-                    if batch_error
+                    f"{alias} ({series_id}) failed to load from live FRED download: {live_error}"
+                    if live_error
                     else f"{alias} ({series_id}) returned no usable rows."
                 )
                 source_status.append(
