@@ -3944,44 +3944,134 @@ def _jheqx_source_review_frame() -> pd.DataFrame:
     )
 
 
+def _jheqx_step_row(step: str, status: str, detail: str) -> dict[str, str]:
+    return {"Step": step, "Status": status, "Detail": detail}
+
+
 def compute_jheqx_collar_dashboard(limit: int = JHEQX_QUARTER_LIMIT) -> dict[str, Any] | None:
     if jheqx_collar is None:
-        return None
+        return {
+            "status": "failed",
+            "quarter_limit": limit,
+            "errors": ["`jheqx_collar.py` could not be imported in the current app runtime."],
+            "warnings": [],
+            "diagnostics": pd.DataFrame([_jheqx_step_row("Module import", "Failed", "jheqx_collar import unavailable")]),
+            "source_review": _jheqx_source_review_frame(),
+        }
+
+    diagnostics_rows: list[dict[str, str]] = []
+    errors: list[str] = []
+    warnings_list: list[str] = []
+
+    requested_limit = max(limit + 2, 10)
+    try:
+        quarterly_snapshots = jheqx_collar.load_jheqx_quarterly_snapshots(limit=requested_limit)
+        diagnostics_rows.append(_jheqx_step_row("SEC quarterly filings", "OK", f"{len(quarterly_snapshots)} snapshot(s) loaded"))
+    except Exception as exc:
+        errors.append(f"SEC quarterly filing load failed: {exc}")
+        diagnostics_rows.append(_jheqx_step_row("SEC quarterly filings", "Failed", str(exc)))
+        return {
+            "status": "failed",
+            "quarter_limit": limit,
+            "errors": errors,
+            "warnings": warnings_list,
+            "diagnostics": pd.DataFrame(diagnostics_rows),
+            "source_review": _jheqx_source_review_frame(),
+        }
 
     try:
-        requested_limit = max(limit + 2, 10)
-        quarterly_snapshots = jheqx_collar.load_jheqx_quarterly_snapshots(limit=requested_limit)
         monthly_snapshot = jheqx_collar.load_latest_monthly_snapshot()
-        merged_snapshots = jheqx_collar._merge_public_snapshots(quarterly_snapshots, monthly_snapshot)
-        if not merged_snapshots:
-            return None
+        detail = (
+            f"{monthly_snapshot.source_kind} as of {monthly_snapshot.as_of_date.isoformat()}"
+            if monthly_snapshot is not None
+            else "No current-quarter monthly override available"
+        )
+        diagnostics_rows.append(_jheqx_step_row("JPM monthly holdings", "OK", detail))
+    except Exception as exc:
+        monthly_snapshot = None
+        warnings_list.append(f"JPM monthly holdings override unavailable: {exc}")
+        diagnostics_rows.append(_jheqx_step_row("JPM monthly holdings", "Warning", str(exc)))
 
-        market_start = jheqx_collar._quarter_start(merged_snapshots[-1].as_of_date) - timedelta(days=10)
-        market_end = date.today()
+    merged_snapshots = jheqx_collar._merge_public_snapshots(quarterly_snapshots, monthly_snapshot)
+    if not merged_snapshots:
+        errors.append("No merged JHEQX public snapshots were available after SEC/JPM processing.")
+        diagnostics_rows.append(_jheqx_step_row("Snapshot merge", "Failed", errors[-1]))
+        return {
+            "status": "failed",
+            "quarter_limit": limit,
+            "errors": errors,
+            "warnings": warnings_list,
+            "diagnostics": pd.DataFrame(diagnostics_rows),
+            "source_review": _jheqx_source_review_frame(),
+        }
+    diagnostics_rows.append(_jheqx_step_row("Snapshot merge", "OK", f"{len(merged_snapshots)} merged snapshot(s)"))
+
+    market_start = jheqx_collar._quarter_start(merged_snapshots[-1].as_of_date) - timedelta(days=10)
+    market_end = date.today()
+    try:
         spx_prices = jheqx_collar.load_market_prices("^GSPC", market_start, market_end)
-        if not spx_prices:
-            return None
+    except Exception as exc:
+        errors.append(f"SPX history load failed: {exc}")
+        diagnostics_rows.append(_jheqx_step_row("SPX history", "Failed", str(exc)))
+        return {
+            "status": "failed",
+            "quarter_limit": limit,
+            "errors": errors,
+            "warnings": warnings_list,
+            "diagnostics": pd.DataFrame(diagnostics_rows),
+            "source_review": _jheqx_source_review_frame(),
+        }
+    if not spx_prices:
+        errors.append("SPX history returned no rows for the requested overlay window.")
+        diagnostics_rows.append(_jheqx_step_row("SPX history", "Failed", errors[-1]))
+        return {
+            "status": "failed",
+            "quarter_limit": limit,
+            "errors": errors,
+            "warnings": warnings_list,
+            "diagnostics": pd.DataFrame(diagnostics_rows),
+            "source_review": _jheqx_source_review_frame(),
+        }
+    diagnostics_rows.append(_jheqx_step_row("SPX history", "OK", f"{len(spx_prices)} price row(s)"))
 
-        latest_market_date = spx_prices[-1]["date"]
-        visible_snapshots = jheqx_collar._extend_snapshots_with_estimate(
-            merged_snapshots,
-            spx_prices,
-            latest_market_date,
-        )[:limit]
-        if not visible_snapshots:
-            return None
+    latest_market_date = spx_prices[-1]["date"]
+    visible_snapshots = jheqx_collar._extend_snapshots_with_estimate(
+        merged_snapshots,
+        spx_prices,
+        latest_market_date,
+    )[:limit]
+    if not visible_snapshots:
+        errors.append("No visible JHEQX snapshots remained after estimate extension.")
+        diagnostics_rows.append(_jheqx_step_row("Visible window", "Failed", errors[-1]))
+        return {
+            "status": "failed",
+            "quarter_limit": limit,
+            "errors": errors,
+            "warnings": warnings_list,
+            "diagnostics": pd.DataFrame(diagnostics_rows),
+            "source_review": _jheqx_source_review_frame(),
+        }
+    diagnostics_rows.append(_jheqx_step_row("Visible window", "OK", f"{len(visible_snapshots)} quarter(s)"))
 
-        latest_public = next((item for item in visible_snapshots if not item.is_estimated), None)
-        estimated_snapshot = next((item for item in visible_snapshots if item.is_estimated), None)
-        overlay = jheqx_collar.build_overlay_series(visible_snapshots, spx_prices)
+    latest_public = next((item for item in visible_snapshots if not item.is_estimated), None)
+    estimated_snapshot = next((item for item in visible_snapshots if item.is_estimated), None)
+    overlay = jheqx_collar.build_overlay_series(visible_snapshots, spx_prices)
 
+    qqqi_snapshot = None
+    qqqi_public_aum = None
+    qqqi_overlay_rows: list[dict[str, Any]] = []
+    qqqi_overlay_spec: dict[str, Any] | None = None
+    qqqi_leg_rows: list[dict[str, Any]] = []
+    qqqi_error: str | None = None
+    try:
         qqqi_snapshot = jheqx_collar.load_qqqi_public_snapshot()
-        qqqi_public_aum = None
-        qqqi_overlay_rows: list[dict[str, Any]] = []
-        qqqi_overlay_spec: dict[str, Any] | None = None
-        qqqi_leg_rows: list[dict[str, Any]] = []
-        qqqi_error: str | None = None
-        if qqqi_snapshot is not None and qqqi_snapshot.legs:
+        if qqqi_snapshot is None:
+            warnings_list.append("QQQI public holdings were unavailable.")
+            diagnostics_rows.append(_jheqx_step_row("QQQI overlay", "Warning", "No public holdings snapshot"))
+        elif not qqqi_snapshot.legs:
+            warnings_list.append("QQQI metadata loaded but no public NDX option legs were parsed.")
+            diagnostics_rows.append(_jheqx_step_row("QQQI overlay", "Warning", "No public NDX legs parsed"))
+        else:
             try:
                 qqqi_page_html = jheqx_collar._request_text(jheqx_collar.NEOS_QQQI_PAGE_URL, jheqx_collar.NEOS_HEADERS)
                 qqqi_page_metadata = jheqx_collar._extract_qqqi_page_metadata(qqqi_page_html)
@@ -3989,58 +4079,74 @@ def compute_jheqx_collar_dashboard(limit: int = JHEQX_QUARTER_LIMIT) -> dict[str
             except Exception:
                 qqqi_public_aum = None
 
-            try:
-                ndx_start = max(qqqi_snapshot.as_of_date - timedelta(days=45), date(2024, 1, 1))
-                ndx_end = min(date.today(), qqqi_snapshot.as_of_date)
-                ndx_prices = jheqx_collar.load_market_prices("^NDX", ndx_start, ndx_end)
-                if ndx_prices:
-                    enriched_qqqi = replace(
-                        qqqi_snapshot,
-                        underlying_level=jheqx_collar._find_close_on_or_before(ndx_prices, qqqi_snapshot.as_of_date),
-                    )
-                    qqqi_overlay = jheqx_collar.build_overlay_series([enriched_qqqi], ndx_prices)
-                    qqqi_overlay_rows = jheqx_collar._extend_overlay_with_current_level(
-                        qqqi_overlay["combined_rows"],
-                        enriched_qqqi,
-                        "Current NDX",
-                    )
-                    qqqi_leg_rows = jheqx_collar._qqqi_leg_table_rows(enriched_qqqi)
-                    qqqi_overlay_spec = jheqx_collar._build_overlay_chart_spec(
-                        y_title="NDX Level / Option Strike",
-                        height=360,
-                        series_colors=jheqx_collar._overlay_series_colors(
-                            "NDX Index",
-                            [leg.series for leg in enriched_qqqi.legs] + ["Current NDX"],
-                        ),
-                    )
-            except Exception as exc:
-                qqqi_error = str(exc)
+            ndx_start = max(qqqi_snapshot.as_of_date - timedelta(days=45), date(2024, 1, 1))
+            ndx_end = min(date.today(), qqqi_snapshot.as_of_date)
+            ndx_prices = jheqx_collar.load_market_prices("^NDX", ndx_start, ndx_end)
+            if ndx_prices:
+                enriched_qqqi = replace(
+                    qqqi_snapshot,
+                    underlying_level=jheqx_collar._find_close_on_or_before(ndx_prices, qqqi_snapshot.as_of_date),
+                )
+                qqqi_overlay = jheqx_collar.build_overlay_series([enriched_qqqi], ndx_prices)
+                qqqi_overlay_rows = jheqx_collar._extend_overlay_with_current_level(
+                    qqqi_overlay["combined_rows"],
+                    enriched_qqqi,
+                    "Current NDX",
+                )
+                qqqi_leg_rows = jheqx_collar._qqqi_leg_table_rows(enriched_qqqi)
+                qqqi_overlay_spec = jheqx_collar._build_overlay_chart_spec(
+                    y_title="NDX Level / Option Strike",
+                    height=360,
+                    series_colors=jheqx_collar._overlay_series_colors(
+                        "NDX Index",
+                        [leg.series for leg in enriched_qqqi.legs] + ["Current NDX"],
+                    ),
+                )
+                diagnostics_rows.append(_jheqx_step_row("QQQI overlay", "OK", f"{len(enriched_qqqi.legs)} disclosed leg(s)"))
+            else:
+                warnings_list.append("QQQI NDX price history returned no rows.")
+                diagnostics_rows.append(_jheqx_step_row("QQQI overlay", "Warning", "NDX price history unavailable"))
+    except Exception as exc:
+        qqqi_error = str(exc)
+        warnings_list.append(f"QQQI overlay unavailable: {exc}")
+        diagnostics_rows.append(_jheqx_step_row("QQQI overlay", "Warning", str(exc)))
 
+    try:
         jepq_reference = jheqx_collar.load_jepq_flow_reference()
+        detail = (
+            f"AUM {jepq_reference.aum:,.0f}" if jepq_reference is not None and jepq_reference.aum is not None else "Official reference unavailable"
+        )
+        diagnostics_rows.append(_jheqx_step_row("JEPQ reference", "OK" if jepq_reference is not None else "Warning", detail))
+    except Exception as exc:
+        jepq_reference = None
+        warnings_list.append(f"JEPQ reference unavailable: {exc}")
+        diagnostics_rows.append(_jheqx_step_row("JEPQ reference", "Warning", str(exc)))
 
-        return {
-            "quarter_limit": limit,
-            "visible_snapshots": visible_snapshots,
-            "latest_public": latest_public,
-            "estimated_snapshot": estimated_snapshot,
-            "overlay_rows": overlay["combined_rows"],
-            "overlay_spec": jheqx_collar._build_overlay_chart_spec(
-                y_title="SPX Level / Option Strike",
-                height=420,
-            ),
-            "snapshot_table": pd.DataFrame(jheqx_collar._snapshot_table_rows(visible_snapshots)),
-            "monthly_snapshot": monthly_snapshot,
-            "qqqi_snapshot": qqqi_snapshot,
-            "qqqi_public_aum": qqqi_public_aum,
-            "qqqi_overlay_rows": qqqi_overlay_rows,
-            "qqqi_overlay_spec": qqqi_overlay_spec,
-            "qqqi_leg_rows": pd.DataFrame(qqqi_leg_rows),
-            "qqqi_error": qqqi_error,
-            "jepq_reference": jepq_reference,
-            "source_review": _jheqx_source_review_frame(),
-        }
-    except Exception:
-        return None
+    return {
+        "status": "ok",
+        "quarter_limit": limit,
+        "errors": errors,
+        "warnings": warnings_list,
+        "diagnostics": pd.DataFrame(diagnostics_rows),
+        "visible_snapshots": visible_snapshots,
+        "latest_public": latest_public,
+        "estimated_snapshot": estimated_snapshot,
+        "overlay_rows": overlay["combined_rows"],
+        "overlay_spec": jheqx_collar._build_overlay_chart_spec(
+            y_title="SPX Level / Option Strike",
+            height=420,
+        ),
+        "snapshot_table": pd.DataFrame(jheqx_collar._snapshot_table_rows(visible_snapshots)),
+        "monthly_snapshot": monthly_snapshot,
+        "qqqi_snapshot": qqqi_snapshot,
+        "qqqi_public_aum": qqqi_public_aum,
+        "qqqi_overlay_rows": qqqi_overlay_rows,
+        "qqqi_overlay_spec": qqqi_overlay_spec,
+        "qqqi_leg_rows": pd.DataFrame(qqqi_leg_rows),
+        "qqqi_error": qqqi_error,
+        "jepq_reference": jepq_reference,
+        "source_review": _jheqx_source_review_frame(),
+    }
 
 
 def render_jheqx_collar_header(jheqx_data: dict[str, Any]) -> None:
@@ -4106,6 +4212,8 @@ def render_jheqx_collar_header(jheqx_data: dict[str, Any]) -> None:
 def render_jheqx_collar_dashboard(jheqx_data: dict[str, Any]) -> None:
     estimated_snapshot = jheqx_data.get("estimated_snapshot")
     monthly_snapshot = jheqx_data.get("monthly_snapshot")
+    for warning_text in jheqx_data.get("warnings", []):
+        st.info(warning_text)
     if estimated_snapshot is not None:
         st.warning(
             f"{estimated_snapshot.quarter_label} has no public filing yet. "
@@ -4176,6 +4284,8 @@ def render_jheqx_collar_dashboard(jheqx_data: dict[str, Any]) -> None:
 
     with st.expander("JHEQX source review", expanded=False):
         st.dataframe(jheqx_data["source_review"], use_container_width=True, hide_index=True)
+    with st.expander("JHEQX diagnostics", expanded=False):
+        st.dataframe(jheqx_data["diagnostics"], use_container_width=True, hide_index=True)
 
 
 def _fetch_spx_options_payload() -> dict[str, Any] | None:
@@ -4775,8 +4885,19 @@ def main() -> None:
     if active_view == "JHEQX Collar":
         with st.spinner("Loading JHEQX collar dashboard..."):
             jheqx_data = compute_jheqx_collar_dashboard(limit=JHEQX_QUARTER_LIMIT)
-        if not jheqx_data:
-            st.info("JHEQX collar data could not be loaded from the official SEC/JPM/NEOS source set.")
+        if not jheqx_data or jheqx_data.get("status") != "ok":
+            failure_state = jheqx_data or {
+                "errors": ["JHEQX collar data could not be loaded from the official SEC/JPM/NEOS source set."],
+                "diagnostics": pd.DataFrame([_jheqx_step_row("Dashboard load", "Failed", "No dashboard state returned")]),
+                "source_review": _jheqx_source_review_frame(),
+            }
+            st.error("JHEQX collar core data could not be loaded.")
+            for error_text in failure_state.get("errors", []):
+                st.info(error_text)
+            with st.expander("JHEQX diagnostics", expanded=True):
+                st.dataframe(failure_state["diagnostics"], use_container_width=True, hide_index=True)
+            with st.expander("JHEQX source review", expanded=False):
+                st.dataframe(failure_state["source_review"], use_container_width=True, hide_index=True)
             st.stop()
         render_jheqx_collar_header(jheqx_data)
         st.markdown(
