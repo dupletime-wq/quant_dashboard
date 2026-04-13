@@ -3950,6 +3950,18 @@ def _jheqx_overlay_y_range(frame: pd.DataFrame) -> list[float] | None:
     return [low - pad, high + pad]
 
 
+def _jheqx_overlay_x_range(frame: pd.DataFrame) -> list[pd.Timestamp] | None:
+    clean = frame["date"].dropna()
+    if clean.empty:
+        return None
+    left = pd.Timestamp(clean.min())
+    right = pd.Timestamp(clean.max())
+    span_days = max(int((right - left).days), 1)
+    left_pad = max(18, int(span_days * 0.03))
+    right_pad = max(32, int(span_days * 0.05))
+    return [left - pd.Timedelta(days=left_pad), right + pd.Timedelta(days=right_pad)]
+
+
 def _jheqx_overlay_color_map(frame: pd.DataFrame, market_series_name: str) -> dict[str, str]:
     if jheqx_collar is not None and hasattr(jheqx_collar, "_overlay_series_colors"):
         option_series = [series for series in frame["series"].unique().tolist() if series != market_series_name]
@@ -4023,9 +4035,10 @@ def build_jheqx_overlay_figure(
             seen_series.add(series_name)
 
     y_range = _jheqx_overlay_y_range(frame)
+    x_range = _jheqx_overlay_x_range(frame)
     fig = apply_figure_style(fig, title=title, height=560, legend_y=1.10)
     fig.update_layout(
-        margin=dict(l=22, r=22, t=96, b=18),
+        margin=dict(l=34, r=34, t=104, b=28),
         legend=dict(
             orientation="h",
             y=1.10,
@@ -4036,10 +4049,12 @@ def build_jheqx_overlay_figure(
         ),
         hovermode="x unified",
     )
-    fig.update_yaxes(title_text=y_title, tickformat=",")
-    fig.update_xaxes(title_text="", dtick="M2", tickformat="%b\n%Y")
+    fig.update_yaxes(title_text=y_title, tickformat=",", automargin=True)
+    fig.update_xaxes(title_text="", dtick="M2", tickformat="%b\n%Y", automargin=True)
     if y_range is not None:
         fig.update_yaxes(range=y_range)
+    if x_range is not None:
+        fig.update_xaxes(range=x_range)
     return fig
 
 
