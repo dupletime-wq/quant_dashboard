@@ -3939,6 +3939,52 @@ def _jheqx_overlay_frame(overlay_rows: list[dict[str, Any]]) -> pd.DataFrame:
     return frame.sort_values(["series", "status", "date"]).reset_index(drop=True)
 
 
+def _build_jheqx_quarter_overlay_rows(
+    snapshots: list[Any],
+    market_prices: list[dict[str, Any]],
+    *,
+    market_series_name: str = "SPX Index",
+) -> list[dict[str, Any]]:
+    price_rows = [
+        {
+            "date": row["date"].isoformat(),
+            "value": float(row["close"]),
+            "series": market_series_name,
+            "status": "Market",
+        }
+        for row in market_prices
+    ]
+    option_rows: list[dict[str, Any]] = []
+    ordered_snapshots = sorted(snapshots, key=lambda item: (item.hedge_start, item.hedge_end))
+    for snapshot in ordered_snapshots:
+        status_name = "Estimated" if snapshot.is_estimated else "Disclosed"
+        for series_name, attr_name in (
+            ("Long Put", "long_put"),
+            ("Short Put", "short_put"),
+            ("Short Call", "short_call"),
+        ):
+            strike_value = getattr(snapshot, attr_name, None)
+            if strike_value is None or pd.isna(strike_value):
+                continue
+            option_rows.append(
+                {
+                    "date": snapshot.hedge_start.isoformat(),
+                    "value": float(strike_value),
+                    "series": series_name,
+                    "status": status_name,
+                }
+            )
+            option_rows.append(
+                {
+                    "date": snapshot.hedge_end.isoformat(),
+                    "value": float(strike_value),
+                    "series": series_name,
+                    "status": status_name,
+                }
+            )
+    return sorted(price_rows + option_rows, key=lambda row: (row["date"], row["series"], row["status"]))
+
+
 def _jheqx_overlay_y_range(frame: pd.DataFrame) -> list[float] | None:
     clean = frame["value"].dropna()
     if clean.empty:
@@ -4205,7 +4251,7 @@ def compute_jheqx_collar_dashboard(limit: int = JHEQX_QUARTER_LIMIT) -> dict[str
 
     latest_public = next((item for item in visible_snapshots if not item.is_estimated), None)
     estimated_snapshot = next((item for item in visible_snapshots if item.is_estimated), None)
-    overlay = jheqx_collar.build_overlay_series(visible_snapshots, spx_prices)
+    overlay_rows = _build_jheqx_quarter_overlay_rows(visible_snapshots, spx_prices, market_series_name="SPX Index")
 
     qqqi_snapshot = None
     qqqi_public_aum = None
@@ -4281,7 +4327,7 @@ def compute_jheqx_collar_dashboard(limit: int = JHEQX_QUARTER_LIMIT) -> dict[str
         "visible_snapshots": visible_snapshots,
         "latest_public": latest_public,
         "estimated_snapshot": estimated_snapshot,
-        "overlay_rows": overlay["combined_rows"],
+        "overlay_rows": overlay_rows,
         "overlay_spec": jheqx_collar._build_overlay_chart_spec(
             y_title="SPX Level / Option Strike",
             height=420,
