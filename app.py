@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from io import StringIO
 import json
 import os
@@ -38,6 +38,11 @@ try:
 except Exception:
     yf = None
 
+try:
+    import jheqx_collar
+except Exception:
+    jheqx_collar = None
+
 
 PLOT_FONT = {
     "family": '"Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif',
@@ -62,6 +67,7 @@ SPECIAL_ACTION_BUTTONS = [
     {"label": "Canary", "view": "Canary Momentum", "caption": "Risk-on/off rotation"},
     {"label": "Option Gamma", "view": "Options Flow", "caption": "SPX dealer positioning"},
     {"label": "ETF Sortino", "view": "ETF Sortino Leadership", "caption": "ETF leadership and sector risk"},
+    {"label": "JHEQX Collar", "view": "JHEQX Collar", "caption": "SEC/JPM collar reconstruction"},
     {"label": "Fed Watch", "view": "Fed Watch", "caption": "Fed/Treasury liquidity plumbing"},
 ]
 SPECIAL_ACTION_LABELS = {item["view"]: item["label"] for item in SPECIAL_ACTION_BUTTONS}
@@ -174,6 +180,13 @@ DEFAULT_SORTINO_TOP_N = 30
 SORTINO_LOOKBACK_DAYS = 126
 SORTINO_ANNUALIZATION = 252
 SORTINO_SECTOR_TOP_COUNT = 20
+JHEQX_QUARTER_LIMIT = 8
+JHEQX_OFFICIAL_SOURCE_URLS = (
+    "https://www.sec.gov",
+    "https://am.jpmorgan.com",
+    "https://neosfunds.com",
+    "https://query1.finance.yahoo.com",
+)
 ETF_UNIVERSE_SEEDS = [
     "SPY", "IVV", "VOO", "VTI", "ITOT", "SCHB", "QQQ", "QQQM", "DIA", "IWM", "IJH", "IJR",
     "VUG", "SCHG", "VTV", "SCHV", "IWF", "IWD", "VBR", "VBK", "MTUM", "QUAL", "USMV", "VLUE",
@@ -3892,6 +3905,279 @@ def render_etf_sortino_dashboard(sortino_data: dict[str, Any]) -> None:
     )
 
 
+def _jheqx_format_level(value: float | None) -> str:
+    return "n/a" if value is None or np.isnan(value) else f"{value:,.0f}"
+
+
+def _jheqx_source_review_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Source": "SEC N-PORT filings",
+                "Host": "sec.gov",
+                "Purpose": "Quarterly disclosed JHEQX SPX collar strikes",
+                "Official": "Yes",
+                "Base URL": "https://www.sec.gov",
+            },
+            {
+                "Source": "J.P. Morgan monthly holdings PDF",
+                "Host": "am.jpmorgan.com",
+                "Purpose": "Latest public monthly override for the current quarter",
+                "Official": "Yes",
+                "Base URL": "https://am.jpmorgan.com",
+            },
+            {
+                "Source": "NEOS issuer page and holdings CSV",
+                "Host": "neosfunds.com",
+                "Purpose": "QQQI Nasdaq overlay anchor and disclosed option legs",
+                "Official": "Yes",
+                "Base URL": "https://neosfunds.com",
+            },
+            {
+                "Source": "Yahoo Finance chart endpoint",
+                "Host": "query1.finance.yahoo.com",
+                "Purpose": "SPX and NDX price history for overlay context",
+                "Official": "No",
+                "Base URL": "https://query1.finance.yahoo.com",
+            },
+        ]
+    )
+
+
+def compute_jheqx_collar_dashboard(limit: int = JHEQX_QUARTER_LIMIT) -> dict[str, Any] | None:
+    if jheqx_collar is None:
+        return None
+
+    try:
+        requested_limit = max(limit + 2, 10)
+        quarterly_snapshots = jheqx_collar.load_jheqx_quarterly_snapshots(limit=requested_limit)
+        monthly_snapshot = jheqx_collar.load_latest_monthly_snapshot()
+        merged_snapshots = jheqx_collar._merge_public_snapshots(quarterly_snapshots, monthly_snapshot)
+        if not merged_snapshots:
+            return None
+
+        market_start = jheqx_collar._quarter_start(merged_snapshots[-1].as_of_date) - timedelta(days=10)
+        market_end = date.today()
+        spx_prices = jheqx_collar.load_market_prices("^GSPC", market_start, market_end)
+        if not spx_prices:
+            return None
+
+        latest_market_date = spx_prices[-1]["date"]
+        visible_snapshots = jheqx_collar._extend_snapshots_with_estimate(
+            merged_snapshots,
+            spx_prices,
+            latest_market_date,
+        )[:limit]
+        if not visible_snapshots:
+            return None
+
+        latest_public = next((item for item in visible_snapshots if not item.is_estimated), None)
+        estimated_snapshot = next((item for item in visible_snapshots if item.is_estimated), None)
+        overlay = jheqx_collar.build_overlay_series(visible_snapshots, spx_prices)
+
+        qqqi_snapshot = jheqx_collar.load_qqqi_public_snapshot()
+        qqqi_public_aum = None
+        qqqi_overlay_rows: list[dict[str, Any]] = []
+        qqqi_overlay_spec: dict[str, Any] | None = None
+        qqqi_leg_rows: list[dict[str, Any]] = []
+        qqqi_error: str | None = None
+        if qqqi_snapshot is not None and qqqi_snapshot.legs:
+            try:
+                qqqi_page_html = jheqx_collar._request_text(jheqx_collar.NEOS_QQQI_PAGE_URL, jheqx_collar.NEOS_HEADERS)
+                qqqi_page_metadata = jheqx_collar._extract_qqqi_page_metadata(qqqi_page_html)
+                qqqi_public_aum = qqqi_page_metadata.get("net_assets")
+            except Exception:
+                qqqi_public_aum = None
+
+            try:
+                ndx_start = max(qqqi_snapshot.as_of_date - timedelta(days=45), date(2024, 1, 1))
+                ndx_end = min(date.today(), qqqi_snapshot.as_of_date)
+                ndx_prices = jheqx_collar.load_market_prices("^NDX", ndx_start, ndx_end)
+                if ndx_prices:
+                    enriched_qqqi = replace(
+                        qqqi_snapshot,
+                        underlying_level=jheqx_collar._find_close_on_or_before(ndx_prices, qqqi_snapshot.as_of_date),
+                    )
+                    qqqi_overlay = jheqx_collar.build_overlay_series([enriched_qqqi], ndx_prices)
+                    qqqi_overlay_rows = jheqx_collar._extend_overlay_with_current_level(
+                        qqqi_overlay["combined_rows"],
+                        enriched_qqqi,
+                        "Current NDX",
+                    )
+                    qqqi_leg_rows = jheqx_collar._qqqi_leg_table_rows(enriched_qqqi)
+                    qqqi_overlay_spec = jheqx_collar._build_overlay_chart_spec(
+                        y_title="NDX Level / Option Strike",
+                        height=360,
+                        series_colors=jheqx_collar._overlay_series_colors(
+                            "NDX Index",
+                            [leg.series for leg in enriched_qqqi.legs] + ["Current NDX"],
+                        ),
+                    )
+            except Exception as exc:
+                qqqi_error = str(exc)
+
+        jepq_reference = jheqx_collar.load_jepq_flow_reference()
+
+        return {
+            "quarter_limit": limit,
+            "visible_snapshots": visible_snapshots,
+            "latest_public": latest_public,
+            "estimated_snapshot": estimated_snapshot,
+            "overlay_rows": overlay["combined_rows"],
+            "overlay_spec": jheqx_collar._build_overlay_chart_spec(
+                y_title="SPX Level / Option Strike",
+                height=420,
+            ),
+            "snapshot_table": pd.DataFrame(jheqx_collar._snapshot_table_rows(visible_snapshots)),
+            "monthly_snapshot": monthly_snapshot,
+            "qqqi_snapshot": qqqi_snapshot,
+            "qqqi_public_aum": qqqi_public_aum,
+            "qqqi_overlay_rows": qqqi_overlay_rows,
+            "qqqi_overlay_spec": qqqi_overlay_spec,
+            "qqqi_leg_rows": pd.DataFrame(qqqi_leg_rows),
+            "qqqi_error": qqqi_error,
+            "jepq_reference": jepq_reference,
+            "source_review": _jheqx_source_review_frame(),
+        }
+    except Exception:
+        return None
+
+
+def render_jheqx_collar_header(jheqx_data: dict[str, Any]) -> None:
+    latest_public = jheqx_data.get("latest_public")
+    latest_source = (
+        f"{latest_public.source_kind} as of {latest_public.as_of_date.isoformat()}"
+        if latest_public is not None
+        else "Public source unavailable"
+    )
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    st.markdown(
+        f"""
+        <div class="hero">
+            <h1>JHEQX Collar - Quarterly Overlay</h1>
+            <p>
+                Reconstruct the JHEQX SPX collar from official SEC and J.P. Morgan disclosures, then
+                compare it with public Nasdaq-overlay references. Window is fixed to the latest {jheqx_data["quarter_limit"]} quarters.
+                Last refresh: {current_time}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    metric_cards = st.columns(5)
+    with metric_cards[0]:
+        render_metric_card(
+            "Visible Window",
+            f"{jheqx_data['quarter_limit']} quarters",
+            "Fixed dashboard horizon",
+            "neutral",
+        )
+    with metric_cards[1]:
+        render_metric_card(
+            "Latest Public Quarter",
+            latest_public.quarter_label if latest_public is not None else "n/a",
+            latest_source,
+            "accent",
+        )
+    with metric_cards[2]:
+        render_metric_card(
+            "Long Put",
+            _jheqx_format_level(latest_public.long_put if latest_public is not None else None),
+            "Current public downside hedge",
+            "bull",
+        )
+    with metric_cards[3]:
+        render_metric_card(
+            "Short Put",
+            _jheqx_format_level(latest_public.short_put if latest_public is not None else None),
+            "Financed downside strike",
+            "neutral",
+        )
+    with metric_cards[4]:
+        render_metric_card(
+            "Short Call",
+            _jheqx_format_level(latest_public.short_call if latest_public is not None else None),
+            "Upside cap strike",
+            "bear",
+        )
+
+
+def render_jheqx_collar_dashboard(jheqx_data: dict[str, Any]) -> None:
+    estimated_snapshot = jheqx_data.get("estimated_snapshot")
+    monthly_snapshot = jheqx_data.get("monthly_snapshot")
+    if estimated_snapshot is not None:
+        st.warning(
+            f"{estimated_snapshot.quarter_label} has no public filing yet. "
+            f"The dashboard carries forward the last disclosed collar dated {estimated_snapshot.as_of_date.isoformat()}."
+        )
+    elif monthly_snapshot is None and getattr(jheqx_collar, "PdfReader", None) is None:
+        st.info("`pypdf` is not installed, so the latest JPM monthly holdings PDF override is unavailable.")
+
+    st.markdown(
+        '<div class="section-note">This quick view uses official SEC N-PORT filings for disclosed quarterly strikes, J.P. Morgan monthly holdings when available for the current quarter, issuer-level NEOS holdings for the Nasdaq anchor, and Yahoo index history for visual context.</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### JHEQX SPX Collar Overlay")
+    st.vega_lite_chart(jheqx_data["overlay_rows"], jheqx_data["overlay_spec"], use_container_width=True)
+
+    st.markdown("#### Quarterly Source Table")
+    st.dataframe(jheqx_data["snapshot_table"], use_container_width=True, hide_index=True)
+    st.caption(
+        "SPX is plotted on its native index scale. Collar strikes remain flat through each quarter and reset at the next hedge start. If the current quarter is available from the JPM monthly holdings PDF, that source overrides the SEC carry-forward estimate."
+    )
+
+    st.divider()
+    st.markdown("#### Nasdaq Anchor")
+    anchor_cards = st.columns(2)
+    qqqi_snapshot = jheqx_data.get("qqqi_snapshot")
+    with anchor_cards[0]:
+        if qqqi_snapshot is None:
+            render_metric_card("QQQI", "Unavailable", "Public issuer holdings not available", "neutral")
+        else:
+            qqqi_subtitle = (
+                f"{len(qqqi_snapshot.legs)} disclosed NDX option legs as of {qqqi_snapshot.as_of_date.isoformat()}"
+                if qqqi_snapshot.legs
+                else f"No public NDX legs parsed as of {qqqi_snapshot.as_of_date.isoformat()}"
+            )
+            qqqi_value = (
+                f"${jheqx_data['qqqi_public_aum'] / 1_000_000_000:,.2f}B"
+                if jheqx_data.get("qqqi_public_aum") is not None
+                else qqqi_snapshot.quarter_label
+            )
+            render_metric_card("QQQI", qqqi_value, qqqi_subtitle, "accent")
+    with anchor_cards[1]:
+        jepq_reference = jheqx_data.get("jepq_reference")
+        if jepq_reference is None:
+            render_metric_card("JEPQ", "Unavailable", "Official holdings reference not available", "neutral")
+        else:
+            jepq_value = "n/a" if jepq_reference.aum is None else f"${jepq_reference.aum / 1_000_000_000:,.2f}B"
+            jepq_subtitle = (
+                f"{jepq_reference.visibility} | as of {jepq_reference.as_of_date.isoformat()}"
+                if jepq_reference.as_of_date is not None
+                else jepq_reference.visibility
+            )
+            render_metric_card("JEPQ", jepq_value, jepq_subtitle, "neutral")
+
+    if qqqi_snapshot is None:
+        st.info("QQQI public holdings could not be loaded, so the Nasdaq anchor chart is omitted.")
+    elif jheqx_data.get("qqqi_overlay_rows") and jheqx_data.get("qqqi_overlay_spec") is not None:
+        st.vega_lite_chart(jheqx_data["qqqi_overlay_rows"], jheqx_data["qqqi_overlay_spec"], use_container_width=True)
+        if not jheqx_data["qqqi_leg_rows"].empty:
+            st.dataframe(jheqx_data["qqqi_leg_rows"], use_container_width=True, hide_index=True)
+        st.caption(
+            "QQQI is shown as a disclosed current-cycle NDX overlay. The blue line is NDX, the dashed extension carries the current NDX level through option expiry, and the option lines reflect publicly disclosed strikes."
+        )
+    elif jheqx_data.get("qqqi_error"):
+        st.info(f"QQQI overlay could not be completed: {jheqx_data['qqqi_error']}")
+    else:
+        st.info("QQQI metadata loaded, but no public NDX option legs were parsed from the issuer holdings file.")
+
+    with st.expander("JHEQX source review", expanded=False):
+        st.dataframe(jheqx_data["source_review"], use_container_width=True, hide_index=True)
+
+
 def _fetch_spx_options_payload() -> dict[str, Any] | None:
     try:
         response = requests.get(
@@ -4345,7 +4631,7 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         <div class="sidebar-section-card">
             <div class="sidebar-section-eyebrow">Quick Access</div>
             <div class="sidebar-section-title">Special dashboards</div>
-            <div class="sidebar-section-copy">Open cross-asset pulse, canary regime, SPX dealer gamma, ETF leadership, or Fed/Treasury liquidity plumbing without touching the main chart picker.</div>
+            <div class="sidebar-section-copy">Open cross-asset pulse, canary regime, SPX dealer gamma, ETF leadership, JHEQX collar reconstruction, or Fed/Treasury liquidity plumbing without touching the main chart picker.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -4386,6 +4672,8 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
     st.session_state["dashboard_view"] = active_view
     if active_view in SPECIAL_ACTION_LABELS:
         st.sidebar.caption(f"Active quick view: {display_view_name(active_view)}")
+    if active_view == "JHEQX Collar":
+        st.sidebar.caption(f"Fixed history window: latest {JHEQX_QUARTER_LIMIT} quarters")
 
     sortino_top_n = DEFAULT_SORTINO_TOP_N
     if active_view == "ETF Sortino Leadership":
@@ -4484,6 +4772,21 @@ def main() -> None:
     apply_custom_style()
     ticker, period, active_view, selected_expiry, spx_payload, sortino_top_n = render_sidebar(default_ticker="NVDA")
 
+    if active_view == "JHEQX Collar":
+        with st.spinner("Loading JHEQX collar dashboard..."):
+            jheqx_data = compute_jheqx_collar_dashboard(limit=JHEQX_QUARTER_LIMIT)
+        if not jheqx_data:
+            st.info("JHEQX collar data could not be loaded from the official SEC/JPM/NEOS source set.")
+            st.stop()
+        render_jheqx_collar_header(jheqx_data)
+        st.markdown(
+            f'<div class="section-note">Active view: <strong>JHEQX Collar</strong>. This quick view runs independently from the ticker chart stack and is fixed to the latest {JHEQX_QUARTER_LIMIT} quarters.</div>',
+            unsafe_allow_html=True,
+        )
+        render_jheqx_collar_dashboard(jheqx_data)
+        st.caption("Data sources: SEC N-PORT filings, J.P. Morgan public holdings PDFs, NEOS issuer holdings disclosures, and Yahoo Finance index history.")
+        return
+
     if active_view == "Fed Watch":
         with st.spinner("Loading Fed Watch data..."):
             fed_watch_data = fetch_fed_watch_data(period)
@@ -4540,7 +4843,7 @@ def main() -> None:
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     active_view_label = display_view_name(active_view)
     st.markdown(
-        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators are selected from the chart picker, while Fear &amp; Greed, Canary, Option Gamma, ETF Sortino, and Fed Watch run from the quick-access buttons.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators are selected from the chart picker, while Fear &amp; Greed, Canary, Option Gamma, ETF Sortino, JHEQX Collar, and Fed Watch run from the quick-access buttons.</div>',
         unsafe_allow_html=True,
     )
 
