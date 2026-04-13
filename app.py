@@ -14,7 +14,6 @@ import subprocess
 import sys
 from typing import Any
 
-import FinanceDataReader as fdr
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,13 +21,22 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import yfinance as yf
 from matplotlib.patches import Rectangle, Wedge
 from matplotlib.ticker import MaxNLocator
 from plotly.subplots import make_subplots
 from scipy.signal import argrelextrema
 from scipy.stats import norm
 from statsmodels.tsa.seasonal import STL
+
+try:
+    import FinanceDataReader as fdr
+except Exception:
+    fdr = None
+
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 
 
 PLOT_FONT = {
@@ -79,9 +87,9 @@ FED_WATCH_SERIES_SPECS = {
     "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
 }
 FRED_GRAPH_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
-FRED_REQUEST_TIMEOUT_SECONDS = 8
-FRED_CURL_TIMEOUT_SECONDS = 12
-FRED_PDR_BATCH_TIMEOUT_SECONDS = 12
+FRED_REQUEST_TIMEOUT_SECONDS = 20
+FRED_CURL_TIMEOUT_SECONDS = 20
+FRED_PDR_BATCH_TIMEOUT_SECONDS = 25
 FRED_CSV_MAX_WORKERS = 3
 FED_WATCH_CACHE_VERSION = 5
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
@@ -778,29 +786,14 @@ def _download_fred_csv_text_via_curl(params: dict[str, str]) -> tuple[str | None
     if not curl_path:
         return None, "curl is not available"
 
-    command = [curl_path]
-    if os.name == "nt":
-        command.append("--ssl-no-revoke")
-    command.extend(
-        [
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--http1.1",
-            "--connect-timeout",
-            "8",
-            "--max-time",
-            str(FRED_CURL_TIMEOUT_SECONDS),
-            "--retry",
-            "2",
-            "--retry-delay",
-            "1",
-            "-H",
-            "User-Agent: Mozilla/5.0",
-            _fred_request_url(params),
-        ]
-    )
+    command = [
+        curl_path,
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        _fred_request_url(params),
+    ]
     try:
         completed = subprocess.run(
             command,
@@ -808,7 +801,7 @@ def _download_fred_csv_text_via_curl(params: dict[str, str]) -> tuple[str | None
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=FRED_CURL_TIMEOUT_SECONDS + 5,
+            timeout=FRED_CURL_TIMEOUT_SECONDS,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -826,6 +819,19 @@ def _download_fred_csv_text_via_curl(params: dict[str, str]) -> tuple[str | None
     return text, None
 
 
+def _download_fred_csv_text_via_pandas(params: dict[str, str]) -> tuple[str | None, str | None]:
+    try:
+        frame = pd.read_csv(_fred_request_url(params))
+    except pd.errors.EmptyDataError:
+        return None, "pandas URL read returned an empty response"
+    except Exception as exc:
+        return None, str(exc)
+
+    if frame is None or frame.empty:
+        return None, "pandas URL read returned an empty response"
+    return frame.to_csv(index=False), None
+
+
 def _download_single_fred_csv_series(
     alias: str,
     start: pd.Timestamp,
@@ -841,14 +847,19 @@ def _download_single_fred_csv_series(
     source_label = "Live FRED CSV"
     response_text, primary_error = _download_fred_csv_text_via_curl(params)
     if response_text is None:
-        if os.name == "nt":
-            return alias, None, None, primary_error or "curl failed"
         response_text, fallback_error = _download_fred_csv_text_via_requests(params)
         if response_text is None:
-            detail = primary_error or "curl failed"
-            if fallback_error and fallback_error != detail:
-                detail = f"curl failed: {detail}; requests fallback failed: {fallback_error}"
-            return alias, None, None, detail
+            response_text, pandas_error = _download_fred_csv_text_via_pandas(params)
+            if response_text is None:
+                detail = primary_error or "curl failed"
+                if fallback_error and fallback_error != detail:
+                    detail = f"curl failed: {detail}; requests fallback failed: {fallback_error}"
+                if pandas_error and pandas_error not in detail:
+                    detail = f"{detail}; pandas URL fallback failed: {pandas_error}"
+                return alias, None, None, detail
+            source_label = "Live FRED CSV (pandas URL fallback)"
+        else:
+            source_label = "Live FRED CSV (requests fallback)"
 
     try:
         frame = pd.read_csv(StringIO(response_text))
@@ -1264,70 +1275,76 @@ def get_fdr_candidates(ticker: str) -> list[str]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_price_data(ticker: str, period: str = LOOKBACK_PERIOD) -> tuple[pd.DataFrame, str, str]:
-    for candidate in get_yfinance_candidates(ticker):
-        try:
-            df = yf.download(
-                candidate,
-                period=period,
-                interval="1d",
-                progress=False,
-                auto_adjust=False,
-                threads=False,
-            )
-        except Exception:
-            continue
+    if yf is not None:
+        for candidate in get_yfinance_candidates(ticker):
+            try:
+                df = yf.download(
+                    candidate,
+                    period=period,
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=False,
+                    threads=False,
+                )
+            except Exception:
+                continue
 
-        frame = normalize_ohlcv_frame(df)
-        if not frame.empty:
-            return frame, "Yahoo Finance", candidate
+            frame = normalize_ohlcv_frame(df)
+            if not frame.empty:
+                return frame, "Yahoo Finance", candidate
 
-    for candidate in get_fdr_candidates(ticker):
-        try:
-            df = fdr.DataReader(candidate, "2020-01-01")
-        except Exception:
-            continue
+    if fdr is not None:
+        for candidate in get_fdr_candidates(ticker):
+            try:
+                df = fdr.DataReader(candidate, "2020-01-01")
+            except Exception:
+                continue
 
-        frame = normalize_ohlcv_frame(df)
-        if not frame.empty:
-            return frame, "FinanceDataReader", candidate
+            frame = normalize_ohlcv_frame(df)
+            if not frame.empty:
+                return frame, "FinanceDataReader", candidate
 
     return pd.DataFrame(), "Yahoo Finance", ticker.strip().upper()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_stl_data(ticker: str) -> tuple[pd.DataFrame, str, str]:
-    for candidate in get_fdr_candidates(ticker):
-        try:
-            df = fdr.DataReader(candidate, "2020-01-01")
-        except Exception:
-            continue
+    if fdr is not None:
+        for candidate in get_fdr_candidates(ticker):
+            try:
+                df = fdr.DataReader(candidate, "2020-01-01")
+            except Exception:
+                continue
 
-        frame = normalize_ohlcv_frame(df)
-        if not frame.empty and "Close" in frame.columns:
-            return frame, "FinanceDataReader", candidate
+            frame = normalize_ohlcv_frame(df)
+            if not frame.empty and "Close" in frame.columns:
+                return frame, "FinanceDataReader", candidate
 
-    for candidate in get_yfinance_candidates(ticker):
-        try:
-            df = yf.download(
-                candidate,
-                period="6y",
-                interval="1d",
-                progress=False,
-                auto_adjust=False,
-                threads=False,
-            )
-        except Exception:
-            continue
+    if yf is not None:
+        for candidate in get_yfinance_candidates(ticker):
+            try:
+                df = yf.download(
+                    candidate,
+                    period="6y",
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=False,
+                    threads=False,
+                )
+            except Exception:
+                continue
 
-        frame = normalize_ohlcv_frame(df)
-        if not frame.empty and "Close" in frame.columns:
-            return frame, "Yahoo Finance fallback", candidate
+            frame = normalize_ohlcv_frame(df)
+            if not frame.empty and "Close" in frame.columns:
+                return frame, "Yahoo Finance fallback", candidate
 
     return pd.DataFrame(), "Unavailable", ticker.strip().upper()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_multi_close_data(tickers: list[str], period: str = LOOKBACK_PERIOD) -> pd.DataFrame:
+    if yf is None:
+        return pd.DataFrame(columns=tickers)
     raw = yf.download(
         tickers=tickers,
         period=period,
@@ -1909,7 +1926,9 @@ def build_mobile_fed_watch_figure(fed_watch_data: dict[str, Any]) -> Any:
         axes[0].plot(frame.index, frame["FED_Treasuries"], color="#b42318", linewidth=1.5, linestyle="--", label="Fed Treasuries")
     if _frame_has_data(frame, "Bank_Treasuries"):
         axes[0].plot(frame.index, frame["Bank_Treasuries"], color="#2563eb", linewidth=1.5, label="Bank Treasuries")
-    axes[0].legend(loc="upper left", fontsize=8, frameon=False)
+    handles, labels = axes[0].get_legend_handles_labels()
+    if labels:
+        axes[0].legend(loc="upper left", fontsize=8, frameon=False)
 
     if _frame_has_data(frame, "Spread_Carry"):
         carry = frame["Spread_Carry"]
@@ -1933,7 +1952,9 @@ def build_mobile_fed_watch_figure(fed_watch_data: dict[str, Any]) -> Any:
                 color="#b42318",
                 alpha=0.14,
             )
-    axes[2].legend(loc="upper left", fontsize=8, frameon=False)
+    handles, labels = axes[2].get_legend_handles_labels()
+    if labels:
+        axes[2].legend(loc="upper left", fontsize=8, frameon=False)
 
     if _frame_has_data(frame, "SOFR_Vol"):
         axes[3].plot(frame.index, frame["SOFR_Vol"], color="#7c3aed", linewidth=1.7)
@@ -1944,7 +1965,9 @@ def build_mobile_fed_watch_figure(fed_watch_data: dict[str, Any]) -> Any:
         axes[4].plot(frame.index, frame["ON_RRP"], color="#2563eb", linewidth=1.4, label="ON RRP")
     if _frame_has_data(frame, "Reserves"):
         axes[4].plot(frame.index, frame["Reserves"], color="#0f766e", linewidth=1.4, linestyle="--", label="Reserves")
-    axes[4].legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
+    handles, labels = axes[4].get_legend_handles_labels()
+    if labels:
+        axes[4].legend(loc="upper left", fontsize=8, frameon=False, ncol=2)
 
     if _frame_has_data(frame, "Spread_Curve"):
         curve = frame["Spread_Curve"]
