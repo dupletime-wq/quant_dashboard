@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+import importlib
+import importlib.util
 from io import StringIO
 import json
 import os
@@ -38,10 +40,27 @@ try:
 except Exception:
     yf = None
 
-try:
-    import jheqx_collar
-except Exception:
-    jheqx_collar = None
+
+def _load_jheqx_collar_module(module_path: Path | None = None) -> tuple[Any | None, str | None]:
+    target_path = Path(module_path) if module_path is not None else Path(__file__).resolve().with_name("jheqx_collar.py")
+    try:
+        return importlib.import_module("jheqx_collar"), None
+    except Exception as import_exc:
+        if not target_path.exists():
+            return None, f"standard import failed: {import_exc}; file not found: {target_path}"
+        try:
+            spec = importlib.util.spec_from_file_location("jheqx_collar", target_path)
+            if spec is None or spec.loader is None:
+                return None, f"standard import failed: {import_exc}; file loader could not be created for {target_path}"
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["jheqx_collar"] = module
+            spec.loader.exec_module(module)
+            return module, None
+        except Exception as file_exc:
+            return None, f"standard import failed: {import_exc}; file-path import failed: {file_exc}"
+
+
+jheqx_collar, JHEQX_IMPORT_ERROR = _load_jheqx_collar_module()
 
 
 PLOT_FONT = {
@@ -3909,6 +3928,121 @@ def _jheqx_format_level(value: float | None) -> str:
     return "n/a" if value is None or np.isnan(value) else f"{value:,.0f}"
 
 
+def _jheqx_overlay_frame(overlay_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    if not overlay_rows:
+        return pd.DataFrame(columns=["date", "value", "series", "status"])
+    frame = pd.DataFrame(overlay_rows).copy()
+    frame["date"] = pd.to_datetime(frame["date"])
+    frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+    frame["series"] = frame["series"].astype(str)
+    frame["status"] = frame["status"].astype(str)
+    return frame.sort_values(["series", "status", "date"]).reset_index(drop=True)
+
+
+def _jheqx_overlay_y_range(frame: pd.DataFrame) -> list[float] | None:
+    clean = frame["value"].dropna()
+    if clean.empty:
+        return None
+    low = float(clean.min())
+    high = float(clean.max())
+    span = max(high - low, max(abs(high), 1.0) * 0.05)
+    pad = span * 0.10
+    return [low - pad, high + pad]
+
+
+def _jheqx_overlay_color_map(frame: pd.DataFrame, market_series_name: str) -> dict[str, str]:
+    if jheqx_collar is not None and hasattr(jheqx_collar, "_overlay_series_colors"):
+        option_series = [series for series in frame["series"].unique().tolist() if series != market_series_name]
+        return jheqx_collar._overlay_series_colors(market_series_name, option_series)
+    return {
+        market_series_name: "#1f4e79",
+        "Current NDX": "#1f4e79",
+        "Long Put": "#7f3fbf",
+        "Short Put": "#d97706",
+        "Short Call": "#d62728",
+        "Long Call": "#2ca02c",
+    }
+
+
+def build_jheqx_overlay_figure(
+    overlay_rows: list[dict[str, Any]],
+    *,
+    title: str,
+    y_title: str,
+    market_series_name: str,
+) -> go.Figure:
+    frame = _jheqx_overlay_frame(overlay_rows)
+    fig = go.Figure()
+    if frame.empty:
+        return apply_figure_style(fig, title=title, height=560, showlegend=False)
+
+    color_map = _jheqx_overlay_color_map(frame, market_series_name)
+    seen_series: set[str] = set()
+    status_order = {"Market": 0, "Disclosed": 1, "Estimated": 2, "Current": 3}
+    series_order = list(dict.fromkeys(frame["series"].tolist()))
+
+    for series_name in series_order:
+        series_frame = frame[frame["series"] == series_name].copy()
+        statuses = sorted(series_frame["status"].unique(), key=lambda item: status_order.get(item, 99))
+        for status_name in statuses:
+            trace_frame = series_frame[series_frame["status"] == status_name].copy()
+            if trace_frame.empty:
+                continue
+            dash_style = "solid"
+            line_shape = "linear"
+            line_width = 2.6
+            if status_name == "Estimated":
+                dash_style = "dash"
+                line_shape = "hv"
+            elif status_name == "Disclosed":
+                line_shape = "hv"
+            elif status_name == "Current":
+                dash_style = "dash"
+                line_width = 2.2
+            elif status_name == "Market":
+                line_width = 3.0
+
+            fig.add_trace(
+                go.Scatter(
+                    x=trace_frame["date"],
+                    y=trace_frame["value"],
+                    mode="lines",
+                    name=series_name,
+                    legendgroup=series_name,
+                    showlegend=series_name not in seen_series,
+                    line=dict(
+                        color=color_map.get(series_name, "#475569"),
+                        width=line_width,
+                        dash=dash_style,
+                        shape=line_shape,
+                    ),
+                    customdata=np.column_stack([trace_frame["status"]]),
+                    hovertemplate="%{fullData.name}<br>%{x|%Y-%m-%d}<br>%{y:,.0f}<br>%{customdata[0]}<extra></extra>",
+                )
+            )
+            seen_series.add(series_name)
+
+    y_range = _jheqx_overlay_y_range(frame)
+    fig = apply_figure_style(fig, title=title, height=560, legend_y=1.10)
+    fig.update_layout(
+        margin=dict(l=22, r=22, t=96, b=18),
+        legend=dict(
+            orientation="h",
+            y=1.10,
+            x=0,
+            font=dict(size=11),
+            itemwidth=82,
+            tracegroupgap=8,
+        ),
+        hovermode="x unified",
+    )
+    fig.update_yaxes(title_text=y_title, tickformat=",")
+    fig.update_xaxes(title_text="", dtick="M2", tickformat="%b\n%Y")
+    if y_range is not None:
+        fig.update_yaxes(range=y_range)
+    return fig
+
+
 def _jheqx_source_review_frame() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -3950,12 +4084,13 @@ def _jheqx_step_row(step: str, status: str, detail: str) -> dict[str, str]:
 
 def compute_jheqx_collar_dashboard(limit: int = JHEQX_QUARTER_LIMIT) -> dict[str, Any] | None:
     if jheqx_collar is None:
+        import_detail = JHEQX_IMPORT_ERROR or "unknown import error"
         return {
             "status": "failed",
             "quarter_limit": limit,
-            "errors": ["`jheqx_collar.py` could not be imported in the current app runtime."],
+            "errors": [f"`jheqx_collar.py` could not be imported in the current app runtime. {import_detail}"],
             "warnings": [],
-            "diagnostics": pd.DataFrame([_jheqx_step_row("Module import", "Failed", "jheqx_collar import unavailable")]),
+            "diagnostics": pd.DataFrame([_jheqx_step_row("Module import", "Failed", import_detail)]),
             "source_review": _jheqx_source_review_frame(),
         }
 
@@ -4228,12 +4363,19 @@ def render_jheqx_collar_dashboard(jheqx_data: dict[str, Any]) -> None:
     )
 
     st.markdown("#### JHEQX SPX Collar Overlay")
-    st.vega_lite_chart(jheqx_data["overlay_rows"], jheqx_data["overlay_spec"], use_container_width=True)
+    render_plotly_chart(
+        build_jheqx_overlay_figure(
+            jheqx_data["overlay_rows"],
+            title="JHEQX SPX Collar Overlay",
+            y_title="SPX Level / Option Strike",
+            market_series_name="SPX Index",
+        )
+    )
 
     st.markdown("#### Quarterly Source Table")
     st.dataframe(jheqx_data["snapshot_table"], use_container_width=True, hide_index=True)
     st.caption(
-        "SPX is plotted on its native index scale. Collar strikes remain flat through each quarter and reset at the next hedge start. If the current quarter is available from the JPM monthly holdings PDF, that source overrides the SEC carry-forward estimate."
+        "SPX is plotted on its native index scale. Collar strikes stay flat through each quarter and reset at the next hedge start. Dashed segments indicate estimated or current extensions rather than disclosed quarterly resets."
     )
 
     st.divider()
@@ -4271,7 +4413,14 @@ def render_jheqx_collar_dashboard(jheqx_data: dict[str, Any]) -> None:
     if qqqi_snapshot is None:
         st.info("QQQI public holdings could not be loaded, so the Nasdaq anchor chart is omitted.")
     elif jheqx_data.get("qqqi_overlay_rows") and jheqx_data.get("qqqi_overlay_spec") is not None:
-        st.vega_lite_chart(jheqx_data["qqqi_overlay_rows"], jheqx_data["qqqi_overlay_spec"], use_container_width=True)
+        render_plotly_chart(
+            build_jheqx_overlay_figure(
+                jheqx_data["qqqi_overlay_rows"],
+                title="QQQI NDX Overlay",
+                y_title="NDX Level / Option Strike",
+                market_series_name="NDX Index",
+            )
+        )
         if not jheqx_data["qqqi_leg_rows"].empty:
             st.dataframe(jheqx_data["qqqi_leg_rows"], use_container_width=True, hide_index=True)
         st.caption(
