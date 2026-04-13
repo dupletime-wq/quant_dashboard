@@ -86,12 +86,13 @@ FED_WATCH_SERIES_SPECS = {
     "Reserves": {"fred": "WRESBAL", "scale": 0.001, "unit": "billions"},
     "ON_RRP": {"fred": "RRPONTSYD", "scale": 1.0, "unit": "billions"},
 }
+FED_WATCH_OPTIONAL_SERIES = {"IOER"}
 FRED_GRAPH_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FRED_REQUEST_TIMEOUT_SECONDS = 20
 FRED_CURL_TIMEOUT_SECONDS = 20
 FRED_PDR_BATCH_TIMEOUT_SECONDS = 25
 FRED_CSV_MAX_WORKERS = 3
-FED_WATCH_CACHE_VERSION = 5
+FED_WATCH_CACHE_VERSION = 6
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
 
 
@@ -118,6 +119,57 @@ SAFE_ASSET = "BIL"
 CANARY_RULE = "all_positive"
 CANARY_MIN_POSITIVE = 4
 CANARY_ANALYZER_TICKERS = sorted(set(CANARY_TICKERS + ATTACK_TICKERS + [SAFE_ASSET]))
+CANARY_STATUS_ATTACK = "Attack"
+CANARY_STATUS_DEFENSE = "Defense"
+CANARY_STATUS_INSUFFICIENT = "Insufficient data"
+CANARY_REPORT_COLUMNS = [
+    "asset",
+    "eom_1m",
+    "eom_3m",
+    "eom_6m",
+    "eom_12m_return",
+    "eom_avg_momentum",
+    "eom_state",
+    "realtime_1m",
+    "realtime_3m",
+    "realtime_6m",
+    "realtime_12m_return",
+    "realtime_avg_momentum",
+    "realtime_state",
+]
+CANARY_REPORT_DISPLAY_LABELS = {
+    "asset": "Asset",
+    "eom_1m": "EOM 1M (%)",
+    "eom_3m": "EOM 3M (%)",
+    "eom_6m": "EOM 6M (%)",
+    "eom_12m_return": "EOM 12M Return (%)",
+    "eom_avg_momentum": "EOM Avg Momentum (%)",
+    "eom_state": "EOM State",
+    "realtime_1m": "Real-time 1M (%)",
+    "realtime_3m": "Real-time 3M (%)",
+    "realtime_6m": "Real-time 6M (%)",
+    "realtime_12m_return": "Real-time 12M Return (%)",
+    "realtime_avg_momentum": "Real-time Avg Momentum (%)",
+    "realtime_state": "Real-time State",
+}
+ATTACK_REPORT_COLUMNS = [
+    "asset",
+    "eom_avg_momentum",
+    "realtime_1m",
+    "realtime_3m",
+    "realtime_6m",
+    "realtime_12m_return",
+    "realtime_avg_momentum",
+]
+ATTACK_REPORT_DISPLAY_LABELS = {
+    "asset": "Asset",
+    "eom_avg_momentum": "EOM Avg Momentum (%)",
+    "realtime_1m": "Real-time 1M (%)",
+    "realtime_3m": "Real-time 3M (%)",
+    "realtime_6m": "Real-time 6M (%)",
+    "realtime_12m_return": "Real-time 12M Return (%)",
+    "realtime_avg_momentum": "Real-time Avg Momentum (%)",
+}
 DEFAULT_SORTINO_TOP_N = 30
 SORTINO_LOOKBACK_DAYS = 126
 SORTINO_ANNUALIZATION = 252
@@ -1103,6 +1155,10 @@ def _load_cached_fed_watch_series(cached_payload: dict[str, Any] | None, alias: 
     return cached_series.sort_index()
 
 
+def _fed_watch_series_role(alias: str) -> str:
+    return "Legacy optional" if alias in FED_WATCH_OPTIONAL_SERIES else "Core"
+
+
 def _build_fed_watch_payload(
     period: str,
     *,
@@ -1123,8 +1179,10 @@ def _build_fed_watch_payload(
 
     for alias, spec in FED_WATCH_SERIES_SPECS.items():
         series_id = str(spec["fred"])
+        role_label = _fed_watch_series_role(alias)
+        is_optional = alias in FED_WATCH_OPTIONAL_SERIES
         source_label = source_labels.get(alias, "Live")
-        status_label = "OK"
+        status_label = "Fresh"
         warning_text = ""
         live_error = live_errors.get(alias)
 
@@ -1141,26 +1199,29 @@ def _build_fed_watch_payload(
                 clean, aligned, latest_date = _normalize_fed_watch_series(alias, cached_series, daily_index)
                 source_label = f"Cache {cached_date}" if cached_date else "Stale cache"
                 status_label = "Stale fallback"
-                stale_fallback_count += 1
-                if live_error:
+                if not is_optional:
+                    stale_fallback_count += 1
+                if not is_optional and live_error:
                     warning_text = (
                         f"{alias} ({series_id}) was unavailable from live FRED download. "
                         f"Using cached series from {cached_date or 'a previous run'}."
                     )
-                else:
+                elif not is_optional:
                     warning_text = f"{alias} ({series_id}) returned no usable live rows. Using cached series from {cached_date or 'a previous run'}."
             else:
                 frame[alias] = np.nan
-                status_label = "Failed" if live_error else "Empty"
-                warning_text = (
-                    f"{alias} ({series_id}) failed to load from live FRED download: {live_error}"
-                    if live_error
-                    else f"{alias} ({series_id}) returned no usable rows."
-                )
+                status_label = "Unavailable"
+                if not is_optional:
+                    warning_text = (
+                        f"{alias} ({series_id}) failed to load from live FRED download: {live_error}"
+                        if live_error
+                        else f"{alias} ({series_id}) returned no usable rows."
+                    )
                 source_status.append(
                     {
                         "Series": alias,
                         "FRED Code": series_id,
+                        "Role": role_label,
                         "Rows": 0,
                         "Latest": "n/a",
                         "Unit": str(spec["unit"]),
@@ -1169,7 +1230,8 @@ def _build_fed_watch_payload(
                         "URL": _fred_series_url(series_id),
                     }
                 )
-                warnings_list.append(warning_text)
+                if warning_text:
+                    warnings_list.append(warning_text)
                 continue
 
         raw_series[alias] = clean
@@ -1180,6 +1242,7 @@ def _build_fed_watch_payload(
             {
                 "Series": alias,
                 "FRED Code": series_id,
+                "Role": role_label,
                 "Rows": int(clean.shape[0]),
                 "Latest": latest_date.strftime("%Y-%m-%d") if latest_date is not None else "n/a",
                 "Unit": str(spec["unit"]),
@@ -1401,7 +1464,7 @@ def get_completed_monthly(series_daily: pd.Series, asof: pd.Timestamp | None = N
 
 def classify_momentum(avg_momentum: float, positive_text: str, negative_text: str) -> str:
     if pd.isna(avg_momentum):
-        return "⚪ 데이터 부족"
+        return CANARY_STATUS_INSUFFICIENT
     return positive_text if avg_momentum > 0 else negative_text
 
 
@@ -1410,12 +1473,12 @@ def decide_canary_regime(signal_map: pd.Series, rule: str = CANARY_RULE, min_pos
     total = int(valid.shape[0])
     positive_count = int((valid > 0).sum())
     if total == 0:
-        return np.nan, 0, 0, "⚪ 데이터 부족"
+        return np.nan, 0, 0, CANARY_STATUS_INSUFFICIENT
     if rule == "tip_only":
         if "TIP" not in valid.index:
-            return np.nan, positive_count, total, "⚪ 데이터 부족"
+            return np.nan, positive_count, total, CANARY_STATUS_INSUFFICIENT
         score = float(valid.loc["TIP"])
-        return score, positive_count, total, "🟢 공격" if score > 0 else "🔴 대피"
+        return score, positive_count, total, CANARY_STATUS_ATTACK if score > 0 else CANARY_STATUS_DEFENSE
     if rule == "majority":
         threshold = int(np.ceil(total / 2))
     elif rule == "at_least_n":
@@ -1423,12 +1486,12 @@ def decide_canary_regime(signal_map: pd.Series, rule: str = CANARY_RULE, min_pos
     else:
         threshold = total
     score = positive_count / total
-    return score, positive_count, total, "🟢 공격" if positive_count >= threshold else "🔴 대피"
+    return score, positive_count, total, CANARY_STATUS_ATTACK if positive_count >= threshold else CANARY_STATUS_DEFENSE
 
 
 def pick_top_assets(df_assets: pd.DataFrame, score_column: str, top_n: int = 4) -> list[str]:
     valid = df_assets.dropna(subset=[score_column]).sort_values(score_column, ascending=False)
-    return valid["자산"].head(top_n).tolist()
+    return valid["asset"].head(top_n).tolist()
 
 
 def build_canary_report(data_daily: pd.DataFrame, asof: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -1445,19 +1508,15 @@ def build_canary_report(data_daily: pd.DataFrame, asof: pd.Timestamp | None = No
             round(eom_moms[2], 2) if not pd.isna(eom_moms[2]) else np.nan,
             round(eom_moms[3], 2) if not pd.isna(eom_moms[3]) else np.nan,
             round(eom_avg, 2) if not pd.isna(eom_avg) else np.nan,
-            classify_momentum(eom_avg, "🟢 유지", "🔴 대피"),
+            classify_momentum(eom_avg, "Positive", "Negative"),
             round(rt_moms[0], 2) if not pd.isna(rt_moms[0]) else np.nan,
             round(rt_moms[1], 2) if not pd.isna(rt_moms[1]) else np.nan,
             round(rt_moms[2], 2) if not pd.isna(rt_moms[2]) else np.nan,
             round(rt_moms[3], 2) if not pd.isna(rt_moms[3]) else np.nan,
             round(rt_avg, 2) if not pd.isna(rt_avg) else np.nan,
-            classify_momentum(rt_avg, "🟢 안전", "🔴 위험"),
+            classify_momentum(rt_avg, "Positive", "Negative"),
         ])
-    return pd.DataFrame(records, columns=[
-        "자산", "전월말 1M(%)", "전월말 3M(%)", "전월말 6M(%)", "전월말 12M 수익률(%)",
-        "전월말 평균 모멘텀(%)", "전월말 상태", "실시간 1M(%)", "실시간 3M(%)",
-        "실시간 6M(%)", "실시간 12M 수익률(%)", "실시간 평균 모멘텀(%)", "실시간 상태",
-    ])
+    return pd.DataFrame(records, columns=CANARY_REPORT_COLUMNS)
 
 
 def build_attack_report(data_daily: pd.DataFrame, asof: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -1476,10 +1535,11 @@ def build_attack_report(data_daily: pd.DataFrame, asof: pd.Timestamp | None = No
             round(rt_moms[3], 2) if not pd.isna(rt_moms[3]) else np.nan,
             round(rt_avg, 2) if not pd.isna(rt_avg) else np.nan,
         ])
-    return pd.DataFrame(records, columns=[
-        "자산", "전월말 평균 모멘텀(%)", "실시간 1M(%)", "실시간 3M(%)",
-        "실시간 6M(%)", "실시간 12M 수익률(%)", "실시간 평균 모멘텀(%)",
-    ]).sort_values(by="실시간 평균 모멘텀(%)", ascending=False, na_position="last").reset_index(drop=True)
+    return pd.DataFrame(records, columns=ATTACK_REPORT_COLUMNS).sort_values(
+        by="realtime_avg_momentum",
+        ascending=False,
+        na_position="last",
+    ).reset_index(drop=True)
 
 
 def compute_canary_momentum_dashboard(period: str = LOOKBACK_PERIOD) -> dict[str, Any] | None:
@@ -1489,12 +1549,12 @@ def compute_canary_momentum_dashboard(period: str = LOOKBACK_PERIOD) -> dict[str
     asof = pd.Timestamp(data_daily.dropna(how="all").index[-1])
     df_canary = build_canary_report(data_daily, asof=asof)
     df_assets = build_attack_report(data_daily, asof=asof)
-    eom_signal = df_canary.set_index("자산")["전월말 평균 모멘텀(%)"]
-    rt_signal = df_canary.set_index("자산")["실시간 평균 모멘텀(%)"]
+    eom_signal = df_canary.set_index("asset")["eom_avg_momentum"]
+    rt_signal = df_canary.set_index("asset")["realtime_avg_momentum"]
     eom_score, eom_pos, eom_total, eom_status = decide_canary_regime(eom_signal)
     rt_score, rt_pos, rt_total, rt_status = decide_canary_regime(rt_signal)
-    current_top4 = pick_top_assets(df_assets, "전월말 평균 모멘텀(%)")
-    predicted_top4 = pick_top_assets(df_assets, "실시간 평균 모멘텀(%)")
+    current_top4 = pick_top_assets(df_assets, "eom_avg_momentum")
+    predicted_top4 = pick_top_assets(df_assets, "realtime_avg_momentum")
     return {
         "asof": asof,
         "data_daily": data_daily,
@@ -1510,27 +1570,27 @@ def canary_signal_label(canary_data: dict[str, Any] | None) -> tuple[str, str]:
         return "Not loaded", "neutral"
     realtime = canary_data["realtime"]["status"]
     eom = canary_data["eom"]["status"]
-    if realtime == "🟢 공격":
-        return f"Attack regime · {canary_data['realtime']['positive']}/{canary_data['realtime']['total']} positive", "bull"
-    if realtime == "🔴 대피":
-        return f"Defense regime · {canary_data['realtime']['positive']}/{canary_data['realtime']['total']} positive", "bear"
-    if eom == "🟢 공격":
+    if realtime == CANARY_STATUS_ATTACK:
+        return f"Attack regime - {canary_data['realtime']['positive']}/{canary_data['realtime']['total']} positive", "bull"
+    if realtime == CANARY_STATUS_DEFENSE:
+        return f"Defense regime - {canary_data['realtime']['positive']}/{canary_data['realtime']['total']} positive", "bear"
+    if eom == CANARY_STATUS_ATTACK:
         return "Completed month remains in attack", "accent"
     return "Insufficient canary data", "neutral"
 
 
 def build_canary_attack_figure(df_assets: pd.DataFrame) -> go.Figure:
-    view = df_assets.copy().sort_values("실시간 평균 모멘텀(%)", ascending=True)
-    colors = ["#0f766e" if (not pd.isna(v) and v >= 0) else "#b42318" for v in view["실시간 평균 모멘텀(%)"]]
+    view = df_assets.copy().sort_values("realtime_avg_momentum", ascending=True)
+    colors = ["#0f766e" if (not pd.isna(v) and v >= 0) else "#b42318" for v in view["realtime_avg_momentum"]]
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=view["실시간 평균 모멘텀(%)"],
-        y=view["자산"],
+        x=view["realtime_avg_momentum"],
+        y=view["asset"],
         orientation="h",
         marker_color=colors,
-        text=view["실시간 평균 모멘텀(%)"].map(lambda v: "n/a" if pd.isna(v) else f"{v:.2f}%"),
+        text=view["realtime_avg_momentum"].map(lambda v: "n/a" if pd.isna(v) else f"{v:.2f}%"),
         textposition="outside",
-        name="실시간 평균 모멘텀",
+        name="Real-time avg momentum",
     ))
     fig.add_vline(x=0, line_color="#64748b", line_dash="dot")
     return apply_figure_style(fig, title="Attack Universe Real-time Momentum Ranking", height=560, showlegend=False)
@@ -1538,18 +1598,28 @@ def build_canary_attack_figure(df_assets: pd.DataFrame) -> go.Figure:
 
 def render_canary_dashboard(canary_data: dict[str, Any]) -> None:
     canary_label, canary_tone = canary_signal_label(canary_data)
+    eom_tone = (
+        "bull"
+        if canary_data["eom"]["status"] == CANARY_STATUS_ATTACK
+        else "bear"
+        if canary_data["eom"]["status"] == CANARY_STATUS_DEFENSE
+        else "neutral"
+    )
     cards = st.columns(4)
     with cards[0]:
         render_metric_card("Canary Rule", CANARY_RULE, f"Threshold setting {CANARY_MIN_POSITIVE}", "neutral")
     with cards[1]:
-        render_metric_card("Completed Month", canary_data["eom"]["status"], f"{canary_data['eom']['positive']}/{canary_data['eom']['total']} canaries positive", "bull" if canary_data["eom"]["status"] == "🟢 공격" else "bear")
+        render_metric_card("Completed Month", canary_data["eom"]["status"], f"{canary_data['eom']['positive']}/{canary_data['eom']['total']} canaries positive", eom_tone)
     with cards[2]:
         render_metric_card("Today", canary_data["realtime"]["status"], f"{canary_data['realtime']['positive']}/{canary_data['realtime']['total']} canaries positive", canary_tone)
     with cards[3]:
         top_assets = ", ".join(canary_data["realtime"]["top_assets"]) if canary_data["realtime"]["top_assets"] else SAFE_ASSET
         render_metric_card("Expected Rotation", top_assets, f"Fallback safe asset {SAFE_ASSET}", "accent")
 
-    st.markdown('<div class="section-note">카나리아 자산(TIP, QQQ, SPY, VEA, VWO, BND)의 전월말 확정 모멘텀과 오늘 기준 실시간 모멘텀을 함께 비교해, 현재 포트폴리오와 다음 월말 리밸런싱 가능성을 한 번에 점검합니다.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-note">Compare completed-month canary momentum with the current live snapshot to gauge whether the portfolio should stay risk-on or rotate defensive at the next rebalance.</div>',
+        unsafe_allow_html=True,
+    )
     render_chart(
         "Attack Universe Real-time Momentum Ranking",
         build_canary_attack_figure(canary_data["attack_report"]),
@@ -1558,18 +1628,43 @@ def render_canary_dashboard(canary_data: dict[str, Any]) -> None:
 
     table_left, table_right = st.columns([1.15, 1.0])
     with table_left:
-        st.markdown("#### 카나리아 상태 비교")
-        st.dataframe(canary_data["canary_report"], use_container_width=True, hide_index=True)
+        st.markdown("#### Canary state comparison")
+        st.dataframe(
+            canary_data["canary_report"].rename(columns=CANARY_REPORT_DISPLAY_LABELS),
+            use_container_width=True,
+            hide_index=True,
+        )
     with table_right:
-        st.markdown("#### 공격 자산 모멘텀 순위")
-        st.dataframe(canary_data["attack_report"], use_container_width=True, hide_index=True)
+        st.markdown("#### Attack asset momentum ranking")
+        st.dataframe(
+            canary_data["attack_report"].rename(columns=ATTACK_REPORT_DISPLAY_LABELS),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.markdown("#### 리밸런싱 액션 가이드")
+    st.markdown("#### Rebalance action guide")
     eom = canary_data["eom"]
     rt = canary_data["realtime"]
-    current_line = f"현재 포트폴리오(전월말 확정): {'공격 모드 유지 → ' + ', '.join(eom['top_assets']) if eom['status'] == '🟢 공격' else '안전 자산 대기 → ' + SAFE_ASSET if eom['status'] == '🔴 대피' else '데이터 부족'}"
-    future_line = f"월말 예측(오늘 종가 기준): {'공격 모드 유지 가능성 → ' + ', '.join(rt['top_assets']) if rt['status'] == '🟢 공격' else '안전 자산 이동 가능성 → ' + SAFE_ASSET if rt['status'] == '🔴 대피' else '데이터 부족'}"
-    st.markdown(f"- 기준 영업일: **{canary_data['asof'].strftime('%Y-%m-%d')}**\n- 실시간 요약: **{canary_label}**\n- {current_line}\n- {future_line}")
+    current_line = (
+        f"Current allocation (completed month): stay in attack assets -> {', '.join(eom['top_assets'])}"
+        if eom["status"] == CANARY_STATUS_ATTACK
+        else f"Current allocation (completed month): stay defensive -> {SAFE_ASSET}"
+        if eom["status"] == CANARY_STATUS_DEFENSE
+        else "Current allocation (completed month): insufficient canary data"
+    )
+    future_line = (
+        f"Month-end projection (today's close): attack remains favored -> {', '.join(rt['top_assets'])}"
+        if rt["status"] == CANARY_STATUS_ATTACK
+        else f"Month-end projection (today's close): defense may take over -> {SAFE_ASSET}"
+        if rt["status"] == CANARY_STATUS_DEFENSE
+        else "Month-end projection (today's close): insufficient canary data"
+    )
+    st.markdown(
+        f"- As of: **{canary_data['asof'].strftime('%Y-%m-%d')}**\n"
+        f"- Real-time summary: **{canary_label}**\n"
+        f"- {current_line}\n"
+        f"- {future_line}"
+    )
 
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -1984,12 +2079,12 @@ def build_mobile_fed_watch_figure(fed_watch_data: dict[str, Any]) -> Any:
 
 
 def build_mobile_canary_attack_figure(df_assets: pd.DataFrame, top_n: int = 6) -> Any:
-    view = df_assets.head(top_n).copy().sort_values("실시간 평균 모멘텀(%)", ascending=True)
+    view = df_assets.head(top_n).copy().sort_values("realtime_avg_momentum", ascending=True)
     fig, ax = plt.subplots(figsize=(6.4, 3.2), constrained_layout=True)
-    colors = ["#0f766e" if (not pd.isna(v) and v >= 0) else "#b42318" for v in view["실시간 평균 모멘텀(%)"]]
-    ax.barh(view["자산"], view["실시간 평균 모멘텀(%)"], color=colors)
+    colors = ["#0f766e" if (not pd.isna(v) and v >= 0) else "#b42318" for v in view["realtime_avg_momentum"]]
+    ax.barh(view["asset"], view["realtime_avg_momentum"], color=colors)
     ax.axvline(0, color="#64748b", linestyle=":", linewidth=1)
-    _mobile_style_axis(ax, "Momentum (%)", x_axis_type="numeric")
+    _mobile_style_axis(ax, "Avg Momentum (%)", x_axis_type="numeric")
     return _mobile_finalize_figure(fig)
 
 
@@ -3029,7 +3124,7 @@ def render_fed_watch_header(fed_watch_data: dict[str, Any]) -> None:
     st.markdown(
         f"""
         <div class="hero">
-            <h1>Fed Watch · Liquidity Plumbing</h1>
+            <h1>Fed Watch - Liquidity Plumbing</h1>
             <p>
                 FRED-based macro quick view across the current {period_label} history window.
                 Net liquidity follows WALCL - TGA - ON RRP. Last refresh: {current_time}
@@ -3051,14 +3146,14 @@ def render_fed_watch_header(fed_watch_data: dict[str, Any]) -> None:
         render_metric_card(
             "TGA",
             format_billions(tga_value),
-            f"20D change {format_billions_change(tga_delta)} · as of {_format_asof_date(fed_watch_data['card_dates'].get('TGA'))}",
+            f"20D change {format_billions_change(tga_delta)}; as of {_format_asof_date(fed_watch_data['card_dates'].get('TGA'))}",
             "bear" if not np.isnan(tga_delta) and tga_delta > 0 else "bull" if not np.isnan(tga_delta) else "neutral",
         )
     with cards[2]:
         render_metric_card(
             "ON RRP",
             format_billions(on_rrp_value),
-            f"20D change {format_billions_change(on_rrp_delta)} · as of {_format_asof_date(fed_watch_data['card_dates'].get('ON_RRP'))}",
+            f"20D change {format_billions_change(on_rrp_delta)}; as of {_format_asof_date(fed_watch_data['card_dates'].get('ON_RRP'))}",
             "bull" if not np.isnan(on_rrp_delta) and on_rrp_delta <= 0 else "accent" if not np.isnan(on_rrp_delta) else "neutral",
         )
     with cards[3]:
@@ -3277,11 +3372,9 @@ def build_fed_watch_figure(fed_watch_data: dict[str, Any]) -> go.Figure:
 
 def _fed_watch_display_warnings(fed_watch_data: dict[str, Any]) -> list[str]:
     warnings_list = list(fed_watch_data.get("warnings", []))
-    frame = fed_watch_data.get("frame")
-    iorb_available = isinstance(frame, pd.DataFrame) and _frame_has_data(frame, "IORB")
     filtered: list[str] = []
     for warning in warnings_list:
-        if iorb_available and "IOER (IOER) returned no usable rows." in warning:
+        if any(f"{alias} (" in warning for alias in FED_WATCH_OPTIONAL_SERIES):
             continue
         filtered.append(warning)
     return filtered
@@ -3295,17 +3388,17 @@ def render_fed_watch_dashboard(fed_watch_data: dict[str, Any]) -> None:
     if stale_fallback_count > 0:
         cache_date = fed_watch_data.get("stale_cache_date")
         cache_text = f" from {cache_date}" if cache_date else ""
-        st.info(f"Using stale cache for {stale_fallback_count} slow FRED series{cache_text}.")
+        st.info(f"Using stale cache for {stale_fallback_count} core FRED series{cache_text}.")
 
     warnings_list = _fed_watch_display_warnings(fed_watch_data)
     if warnings_list:
-        st.info("Partial FRED coverage: " + " | ".join(warnings_list[:4]))
+        st.info("Partial core FRED coverage: " + " | ".join(warnings_list[:4]))
 
     frame = fed_watch_data.get("frame")
     iorb_available = isinstance(frame, pd.DataFrame) and _frame_has_data(frame, "IORB")
     ioer_available = isinstance(frame, pd.DataFrame) and _frame_has_data(frame, "IOER")
     if iorb_available and not ioer_available:
-        st.caption("IOER is a legacy series. Current plumbing spread and dashboard cards continue to use IORB when it is available.")
+        st.caption("IOER is treated as a legacy optional series. Plumbing spread and dashboard cards continue to use IORB when it is available.")
 
     st.markdown(
         '<div class="section-note">This view tracks collateral supply, funding stress, treasury cash drains, and a simple net-liquidity proxy using official FRED series. Values are normalized to billions of dollars where applicable.</div>',
@@ -3708,16 +3801,16 @@ def etf_sortino_signal_label(sortino_data: dict[str, Any] | None) -> tuple[str, 
     if np.isnan(median_sortino):
         return "ETF sortino unavailable", "neutral"
     if median_sortino >= 1.0:
-        return f"Risk-adjusted leadership strong · {top_sector}", "bull"
+        return f"Risk-adjusted leadership strong - {top_sector}", "bull"
     if median_sortino >= 0.5:
-        return f"Leadership constructive · {top_sector}", "accent"
-    return f"Leadership defensive · {top_sector}", "neutral"
+        return f"Leadership constructive - {top_sector}", "accent"
+    return f"Leadership defensive - {top_sector}", "neutral"
 
 
 def build_etf_sortino_figure(leaderboard: pd.DataFrame) -> go.Figure:
     view = leaderboard.head(20).copy().sort_values("Sortino", ascending=True)
     colors = ["#0f766e" if not np.isnan(value) and value >= 0 else "#b42318" for value in view["Sortino"]]
-    labels = [f"{ticker} · {label}" for ticker, label in zip(view["Ticker"], view["Theme/Sector Label"])]
+    labels = [f"{ticker} - {label}" for ticker, label in zip(view["Ticker"], view["Theme/Sector Label"])]
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
@@ -4204,7 +4297,7 @@ def render_header(
     st.markdown(
         f"""
         <div class="hero">
-            <h1>{summary.ticker} · {active_view_label}</h1>
+            <h1>{summary.ticker} - {active_view_label}</h1>
             <p>
                 Selected module only. Controls apply immediately when changed.
                 Last refresh: {current_time}
