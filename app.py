@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -81,15 +82,72 @@ CORE_DASHBOARD_VIEWS = [
     "Williams Vix Fix",
     "Squeeze Momentum",
 ]
+HISTORY_WINDOW_OPTIONS = ["1y", "2y", "3y", "5y"]
 SPECIAL_ACTION_BUTTONS = [
-    {"label": "Fear & Greed", "view": "Market Pulse", "caption": "Cross-asset risk appetite"},
-    {"label": "Canary", "view": "Canary Momentum", "caption": "Risk-on/off rotation"},
-    {"label": "Option Gamma", "view": "Options Flow", "caption": "SPX dealer positioning"},
-    {"label": "ETF Sortino", "view": "ETF Sortino Leadership", "caption": "ETF leadership and sector risk"},
-    {"label": "JHEQX Collar", "view": "JHEQX Collar", "caption": "SEC/JPM collar reconstruction"},
-    {"label": "Fed Watch", "view": "Fed Watch", "caption": "Fed/Treasury liquidity plumbing"},
+    {
+        "label": "Fear & Greed",
+        "view": "Market Pulse",
+        "category": "Macro",
+        "caption": "Cross-asset risk appetite",
+        "ticker_independent": True,
+        "manual_run": False,
+    },
+    {
+        "label": "Canary",
+        "view": "Canary Momentum",
+        "category": "Macro",
+        "caption": "Risk-on/off rotation",
+        "ticker_independent": True,
+        "manual_run": False,
+    },
+    {
+        "label": "Breadth Thrust",
+        "view": "Breadth Thrust",
+        "category": "Macro",
+        "caption": "Zweig breadth thrust for KOSPI200, Nasdaq-100, and S&P 500",
+        "ticker_independent": True,
+        "manual_run": True,
+    },
+    {
+        "label": "Fed Watch",
+        "view": "Fed Watch",
+        "category": "Macro",
+        "caption": "Fed/Treasury liquidity plumbing",
+        "ticker_independent": True,
+        "manual_run": False,
+    },
+    {
+        "label": "Option Gamma",
+        "view": "Options Flow",
+        "category": "Derivatives",
+        "caption": "SPX dealer positioning",
+        "ticker_independent": True,
+        "manual_run": False,
+    },
+    {
+        "label": "JHEQX Collar",
+        "view": "JHEQX Collar",
+        "category": "Derivatives",
+        "caption": "SEC/JPM collar reconstruction",
+        "ticker_independent": True,
+        "manual_run": False,
+    },
+    {
+        "label": "ETF Sortino",
+        "view": "ETF Sortino Leadership",
+        "category": "Leadership",
+        "caption": "ETF leadership and sector risk",
+        "ticker_independent": True,
+        "manual_run": False,
+    },
 ]
+SPECIAL_ACTION_CONFIG = {item["view"]: item for item in SPECIAL_ACTION_BUTTONS}
 SPECIAL_ACTION_LABELS = {item["view"]: item["label"] for item in SPECIAL_ACTION_BUTTONS}
+SPECIAL_ACTION_CATEGORIES = list(dict.fromkeys(item["category"] for item in SPECIAL_ACTION_BUTTONS))
+TICKER_INDEPENDENT_SPECIAL_VIEWS = {
+    item["view"] for item in SPECIAL_ACTION_BUTTONS if item.get("ticker_independent")
+}
+MANUAL_RUN_SPECIAL_VIEWS = {item["view"] for item in SPECIAL_ACTION_BUTTONS if item.get("manual_run")}
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 FED_WATCH_PERIOD_OFFSETS = {
     "1y": pd.DateOffset(years=1),
@@ -119,6 +177,44 @@ FRED_PDR_BATCH_TIMEOUT_SECONDS = 25
 FRED_CSV_MAX_WORKERS = 3
 FED_WATCH_CACHE_VERSION = 6
 FED_WATCH_CACHE_KEYS = tuple(f"fed_watch_{period}" for period in FED_WATCH_PERIOD_OFFSETS)
+BREADTH_THRUST_MARKET_SPECS = {
+    "KOSPI200": {
+        "label": "KOSPI200",
+        "kind": "krx",
+        "constituent_source": "FinanceDataReader SnapDataReader KRX/INDEX/STOCK/1028",
+        "index_source": "FinanceDataReader KS200",
+    },
+    "NASDAQ100": {
+        "label": "Nasdaq-100",
+        "kind": "us",
+        "constituent_source": "Nasdaq-100 Companies page",
+        "index_source": "Breadth from official Nasdaq-100 component snapshot",
+    },
+    "SP500": {
+        "label": "S&P 500",
+        "kind": "us",
+        "constituent_source": "FinanceDataReader StockListing S&P500",
+        "index_source": "Breadth from FinanceDataReader S&P500 snapshot",
+    },
+}
+BREADTH_THRUST_MARKET_ORDER = list(BREADTH_THRUST_MARKET_SPECS)
+BREADTH_THRUST_SIGNAL_LOOKBACK = 10
+BREADTH_THRUST_LOWER_THRESHOLD = 0.40
+BREADTH_THRUST_UPPER_THRESHOLD = 0.615
+BREADTH_THRUST_PAD_DAYS = 320
+BREADTH_THRUST_LOW_COVERAGE_THRESHOLD = 0.85
+BREADTH_THRUST_FETCH_BATCH_SIZE = {
+    "krx": 40,
+    "us": 80,
+}
+BREADTH_THRUST_SESSION_RESULT_KEY = "last_successful_breadth_result"
+BREADTH_THRUST_SESSION_PARAMS_KEY = "last_successful_breadth_params"
+BREADTH_THRUST_SESSION_REQUEST_KEY = "breadth_query_requested"
+BREADTH_THRUST_KOSPI200_SOURCE_URL = "https://en.wikipedia.org/wiki/KOSPI_200"
+BREADTH_THRUST_NASDAQ_SOURCE_URL = "https://www.nasdaq.com/solutions/global-indexes/nasdaq-100/companies"
+BREADTH_THRUST_SP500_SOURCE_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+YAHOO_CHART_MAX_WORKERS = 12
 
 
 @dataclass
@@ -425,6 +521,13 @@ def apply_custom_style() -> None:
             line-height: 1.45;
             color: var(--muted-ink);
         }
+        .sidebar-selection-note {
+            margin-top: 0.45rem;
+            font-size: 0.77rem;
+            font-weight: 700;
+            color: #0f766e;
+            letter-spacing: 0.01em;
+        }
         div[data-testid="stSidebar"] button[kind="secondary"] {
             min-height: 3.25rem;
             border-radius: 18px;
@@ -522,6 +625,56 @@ def render_metric_card(title: str, value: str, subtitle: str, tone: str = "neutr
 
 def display_view_name(view_name: str) -> str:
     return SPECIAL_ACTION_LABELS.get(view_name, view_name)
+
+
+def get_special_action_meta(view_name: str) -> dict[str, Any] | None:
+    return SPECIAL_ACTION_CONFIG.get(view_name)
+
+
+def is_special_dashboard_view(view_name: str) -> bool:
+    return view_name in SPECIAL_ACTION_CONFIG
+
+
+def render_special_dashboard_header(
+    view_name: str,
+    description: str,
+    *,
+    history_window: str | None = None,
+    load_mode: str | None = None,
+    load_subtitle: str | None = None,
+    source_summary: str | None = None,
+) -> None:
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    meta = get_special_action_meta(view_name) or {}
+    window_value = "Fixed" if history_window is None else history_window.upper()
+    window_subtitle = "Independent dashboard horizon" if history_window is None else "Shared dashboard lookback"
+    load_value = load_mode or ("On demand" if meta.get("manual_run") else "Immediate")
+    load_copy = load_subtitle or (
+        "Runs only after pressing Query"
+        if meta.get("manual_run")
+        else "Loads when the dashboard is opened"
+    )
+    source_value = source_summary or meta.get("category", "Special")
+    source_subtitle = meta.get("caption", "Independent special dashboard")
+    st.markdown(
+        f"""
+        <div class="hero">
+            <h1>{display_view_name(view_name)}</h1>
+            <p>
+                {description}
+                Last refresh: {current_time}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    cards = st.columns(3)
+    with cards[0]:
+        render_metric_card("Scope", "Special Dashboard", "Ticker-independent module", "neutral")
+    with cards[1]:
+        render_metric_card("History Window", window_value, window_subtitle, "accent")
+    with cards[2]:
+        render_metric_card(load_value, source_value, f"{load_copy} | {source_subtitle}", "neutral")
 
 
 def render_plotly_chart(fig: go.Figure) -> None:
@@ -1368,8 +1521,206 @@ def get_fdr_candidates(ticker: str) -> list[str]:
     return [normalized]
 
 
+def _to_unix_epoch_seconds(value: str | pd.Timestamp) -> int:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    return int(timestamp.timestamp())
+
+
+def _build_yahoo_chart_url(
+    symbol: str,
+    *,
+    range_value: str | None = None,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+    interval: str = "1d",
+) -> str:
+    params: dict[str, str] = {
+        "interval": interval,
+        "includePrePost": "false",
+        "events": "div,splits,capitalGains",
+    }
+    if range_value:
+        params["range"] = range_value
+    else:
+        if start_date is None or end_date is None:
+            raise ValueError("Yahoo chart start_date and end_date are required when range_value is not provided")
+        params["period1"] = str(_to_unix_epoch_seconds(start_date))
+        params["period2"] = str(_to_unix_epoch_seconds(end_date))
+    return f"{YAHOO_CHART_BASE_URL}/{quote(symbol, safe='')}?{urlencode(params)}"
+
+
+def _build_frame_from_yahoo_chart_payload(payload: dict[str, Any]) -> pd.DataFrame:
+    chart = payload.get("chart", {})
+    if chart.get("error") is not None:
+        return pd.DataFrame()
+    results = chart.get("result") or []
+    if not results:
+        return pd.DataFrame()
+    result = results[0]
+    timestamps = result.get("timestamp") or []
+    quote_items = (result.get("indicators") or {}).get("quote") or []
+    if not timestamps or not quote_items:
+        return pd.DataFrame()
+    quote_frame = pd.DataFrame(quote_items[0], index=pd.to_datetime(timestamps, unit="s"))
+    if quote_frame.empty:
+        return pd.DataFrame()
+    quote_frame = quote_frame.rename(
+        columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        }
+    )
+    adjclose_items = (result.get("indicators") or {}).get("adjclose") or []
+    if adjclose_items and "adjclose" in adjclose_items[0]:
+        quote_frame["Adj Close"] = adjclose_items[0]["adjclose"]
+    return normalize_ohlcv_frame(quote_frame)
+
+
+def _download_yahoo_chart_frame(
+    symbol: str,
+    *,
+    range_value: str | None = None,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+    interval: str = "1d",
+) -> tuple[pd.DataFrame, str | None]:
+    url = _build_yahoo_chart_url(
+        symbol,
+        range_value=range_value,
+        start_date=start_date,
+        end_date=end_date,
+        interval=interval,
+    )
+    headers = _html_request_headers()
+    response_text, curl_error = _download_text_via_curl(url, headers=headers)
+    response_source = "Yahoo Finance chart API via curl"
+    if response_text is None:
+        response_text, requests_error = _download_text_via_requests(url, headers=headers)
+        response_source = "Yahoo Finance chart API via requests"
+        if response_text is None:
+            detail = curl_error or "Yahoo chart curl request failed"
+            if requests_error and requests_error != detail:
+                detail = f"curl failed: {detail}; requests fallback failed: {requests_error}"
+            return pd.DataFrame(), detail
+    try:
+        payload = json.loads(response_text)
+    except Exception as exc:
+        return pd.DataFrame(), f"{response_source} returned invalid JSON: {exc}"
+    frame = _build_frame_from_yahoo_chart_payload(payload)
+    if not frame.empty:
+        return frame, None
+    chart_error = payload.get("chart", {}).get("error")
+    if chart_error:
+        return pd.DataFrame(), f"{response_source}: {chart_error}"
+    return pd.DataFrame(), f"{response_source} returned no usable OHLCV rows"
+
+
+def _download_yahoo_price_frame(
+    ticker: str,
+    *,
+    period: str | None = None,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, str, str | None]:
+    normalized = ticker.strip().upper()
+    last_error: str | None = None
+    for candidate in get_yfinance_candidates(normalized):
+        frame, error_text = _download_yahoo_chart_frame(
+            candidate,
+            range_value=period,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not frame.empty:
+            return frame, candidate, None
+        if error_text:
+            last_error = f"{candidate}: {error_text}"
+    return pd.DataFrame(), normalized, last_error or "Yahoo Finance chart API returned no usable price history"
+
+
+def _download_yahoo_close_series(
+    ticker: str,
+    *,
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp,
+    auto_adjust: bool = True,
+) -> tuple[pd.Series, str | None]:
+    frame, _, error_text = _download_yahoo_price_frame(
+        ticker,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if frame.empty:
+        return pd.Series(dtype=float, name=ticker), error_text
+    close_column = "Adj Close" if auto_adjust and "Adj Close" in frame.columns and frame["Adj Close"].notna().any() else "Close"
+    series = pd.to_numeric(frame[close_column], errors="coerce").dropna()
+    series.index = normalize_datetime_index(series.index)
+    series.name = ticker
+    return series, None
+
+
+def _download_yahoo_close_panel(
+    tickers: list[str],
+    *,
+    start_date: str | pd.Timestamp,
+    end_date: str | pd.Timestamp,
+    auto_adjust: bool = True,
+    max_workers: int = YAHOO_CHART_MAX_WORKERS,
+) -> pd.DataFrame:
+    expected_tickers = dedupe_preserve_order([ticker.strip().upper() for ticker in tickers if str(ticker).strip()])
+    if not expected_tickers:
+        return pd.DataFrame()
+    series_map: dict[str, pd.Series] = {}
+
+    def _fetch_series(symbol: str) -> tuple[str, pd.Series]:
+        series, _ = _download_yahoo_close_series(
+            symbol,
+            start_date=start_date,
+            end_date=end_date,
+            auto_adjust=auto_adjust,
+        )
+        return symbol, series
+
+    worker_count = max(1, min(max_workers, len(expected_tickers)))
+    if worker_count == 1:
+        for symbol in expected_tickers:
+            _, series = _fetch_series(symbol)
+            if not series.empty:
+                series_map[symbol] = series
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {executor.submit(_fetch_series, symbol): symbol for symbol in expected_tickers}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    _, series = future.result()
+                except Exception:
+                    continue
+                if not series.empty:
+                    series_map[symbol] = series
+
+    ordered_series = [series_map[symbol] for symbol in expected_tickers if symbol in series_map]
+    if not ordered_series:
+        return pd.DataFrame(columns=expected_tickers)
+    combined = pd.concat(ordered_series, axis=1)
+    combined.index = normalize_datetime_index(combined.index)
+    combined = combined.sort_index().ffill()
+    return combined.reindex(columns=expected_tickers)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_price_data(ticker: str, period: str = LOOKBACK_PERIOD) -> tuple[pd.DataFrame, str, str]:
+    frame, used_symbol, _ = _download_yahoo_price_frame(ticker, period=period)
+    if not frame.empty:
+        return frame, "Yahoo Finance chart API", used_symbol
+
     if yf is not None:
         for candidate in get_yfinance_candidates(ticker):
             try:
@@ -1404,6 +1755,10 @@ def download_price_data(ticker: str, period: str = LOOKBACK_PERIOD) -> tuple[pd.
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_stl_data(ticker: str) -> tuple[pd.DataFrame, str, str]:
+    frame, used_symbol, _ = _download_yahoo_price_frame(ticker, period="6y")
+    if not frame.empty and "Close" in frame.columns:
+        return frame, "Yahoo Finance chart API", used_symbol
+
     if fdr is not None:
         for candidate in get_fdr_candidates(ticker):
             try:
@@ -1438,6 +1793,17 @@ def download_stl_data(ticker: str) -> tuple[pd.DataFrame, str, str]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_multi_close_data(tickers: list[str], period: str = LOOKBACK_PERIOD) -> pd.DataFrame:
+    start_date = history_window_start(period)
+    end_date = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
+    yahoo_panel = _download_yahoo_close_panel(
+        tickers,
+        start_date=start_date,
+        end_date=end_date,
+        auto_adjust=True,
+    )
+    if not yahoo_panel.empty:
+        return yahoo_panel.reindex(columns=tickers)
+
     if yf is None:
         return pd.DataFrame(columns=tickers)
     raw = yf.download(
@@ -1697,6 +2063,1075 @@ def render_canary_dashboard(canary_data: dict[str, Any]) -> None:
         f"- {current_line}\n"
         f"- {future_line}"
     )
+
+
+def empty_breadth_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "advancers",
+            "decliners",
+            "unchanged",
+            "coverage",
+            "coverage_ratio",
+            "breadth_ratio",
+            "breadth_ema10",
+            "sma200_coverage",
+            "sma200_coverage_ratio",
+            "above_sma200_count",
+            "above_sma200_ratio",
+            "sma200_distance_mean",
+            "thrust_signal",
+        ]
+    )
+
+
+def empty_breadth_signals_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["Date", "Breadth Ratio", "Breadth EMA10", "Coverage", "Coverage Ratio"])
+
+
+def _normalize_column_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9가-힣]+", "", str(value).strip().lower())
+
+
+def _normalize_symbol_series(series: pd.Series, market_kind: str) -> pd.Series:
+    text = series.astype(str).str.strip().str.upper()
+    if market_kind == "krx":
+        return text.str.extract(r"(\d{6})", expand=False)
+    return text.str.replace(".", "-", regex=False).str.extract(r"([A-Z][A-Z0-9\-]{0,9})", expand=False)
+
+
+def _find_constituent_symbol_column(frame: pd.DataFrame, market_kind: str) -> Any | None:
+    if frame.empty:
+        return None
+    normalized_map = {column: _normalize_column_name(column) for column in frame.columns}
+    preferred = (
+        ["종목코드", "단축코드", "code", "symbol", "ticker"]
+        if market_kind == "krx"
+        else ["symbol", "ticker", "code"]
+    )
+    preferred_columns = [
+        column
+        for name in preferred
+        for column, normalized in normalized_map.items()
+        if normalized == name
+    ]
+    candidates = preferred_columns + [column for column in frame.columns if column not in preferred_columns]
+    min_valid = max(5, min(frame.shape[0], int(np.ceil(frame.shape[0] * 0.4))))
+    for column in candidates:
+        normalized = _normalize_symbol_series(frame[column], market_kind)
+        if int(normalized.notna().sum()) >= min_valid:
+            return column
+    return None
+
+
+def _find_constituent_name_column(frame: pd.DataFrame, exclude_column: Any | None = None) -> Any | None:
+    normalized_map = {column: _normalize_column_name(column) for column in frame.columns}
+    preferred = [
+        "종목명",
+        "한글종목명",
+        "company",
+        "companyname",
+        "name",
+        "security",
+        "securityname",
+    ]
+    for preferred_name in preferred:
+        for column, normalized in normalized_map.items():
+            if column == exclude_column:
+                continue
+            if normalized == preferred_name:
+                return column
+    return None
+
+
+def _promote_first_row_to_header_if_needed(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["Ticker", "Name"])
+    if not all(str(column).isdigit() for column in frame.columns):
+        return frame
+    first_row = frame.iloc[0].astype(str).str.strip()
+    normalized_values = [_normalize_column_name(value) for value in first_row]
+    header_tokens = {"symbol", "ticker", "code", "company", "companyname", "name", "security"}
+    if not any(value in header_tokens for value in normalized_values):
+        return frame
+    promoted = frame.iloc[1:].copy()
+    promoted.columns = [value if value else column for column, value in zip(frame.columns, first_row)]
+    return promoted.reset_index(drop=True)
+
+
+def _extract_constituent_frame(frame: pd.DataFrame, market_kind: str) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["Ticker", "Name"])
+    frame = _promote_first_row_to_header_if_needed(frame)
+    symbol_column = _find_constituent_symbol_column(frame, market_kind)
+    if symbol_column is None:
+        return pd.DataFrame(columns=["Ticker", "Name"])
+    name_column = _find_constituent_name_column(frame, exclude_column=symbol_column)
+    symbols = _normalize_symbol_series(frame[symbol_column], market_kind)
+    if name_column is None:
+        names = symbols.copy()
+    else:
+        names = frame[name_column].astype(str).str.strip().replace({"": np.nan})
+    extracted = pd.DataFrame({"Ticker": symbols, "Name": names})
+    extracted["Name"] = extracted["Name"].fillna(extracted["Ticker"])
+    extracted = extracted.dropna(subset=["Ticker"]).copy()
+    extracted["Ticker"] = extracted["Ticker"].astype(str)
+    extracted["Name"] = extracted["Name"].astype(str)
+    extracted = extracted[~extracted["Ticker"].str.upper().isin({"SYMBOL", "TICKER", "CODE", "COMPANY", "SECURITY", "NAME"})].copy()
+    extracted = extracted[~extracted["Ticker"].duplicated(keep="first")]
+    return extracted.reset_index(drop=True)
+
+
+def _html_request_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8",
+        "Cache-Control": "no-cache",
+    }
+
+
+def _download_text_via_curl(url: str, *, headers: dict[str, str] | None = None) -> tuple[str | None, str | None]:
+    curl_path = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl_path:
+        return None, "curl is not available"
+    command = [
+        curl_path,
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--ssl-no-revoke",
+    ]
+    for header_name, header_value in (headers or {}).items():
+        command.extend(["--header", f"{header_name}: {header_value}"])
+    command.append(url)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=FRED_CURL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"curl timed out after {FRED_CURL_TIMEOUT_SECONDS}s"
+    except Exception as exc:
+        return None, str(exc)
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip()
+        return None, detail or f"curl exited with status {completed.returncode}"
+    if not completed.stdout.strip():
+        return None, "curl returned an empty response"
+    return completed.stdout, None
+
+
+def _download_text_via_requests(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[str | None, str | None]:
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=(8, FRED_REQUEST_TIMEOUT_SECONDS),
+            )
+            response.raise_for_status()
+            return response.text, None
+    except requests.Timeout:
+        return None, f"requests timed out after {FRED_REQUEST_TIMEOUT_SECONDS}s"
+    except requests.RequestException as exc:
+        return None, str(exc)
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _read_html_tables_with_fallback(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[list[pd.DataFrame], str | None, str | None]:
+    response_text, curl_error = _download_text_via_curl(url, headers=headers)
+    if response_text is not None:
+        try:
+            return pd.read_html(StringIO(response_text)), "curl html", None
+        except ValueError as exc:
+            curl_error = str(exc)
+        except Exception as exc:
+            curl_error = str(exc)
+    response_text, requests_error = _download_text_via_requests(url, headers=headers)
+    if response_text is not None:
+        try:
+            return pd.read_html(StringIO(response_text)), "requests html", None
+        except ValueError as exc:
+            requests_error = str(exc)
+        except Exception as exc:
+            requests_error = str(exc)
+    try:
+        return pd.read_html(url), "pandas url fallback", None
+    except ValueError as exc:
+        pandas_error = str(exc)
+    except Exception as exc:
+        pandas_error = str(exc)
+    detail = curl_error or "curl html fetch failed"
+    if requests_error and requests_error != detail:
+        detail = f"curl failed: {detail}; requests fallback failed: {requests_error}"
+    if pandas_error and pandas_error not in detail:
+        detail = f"{detail}; pandas URL fallback failed: {pandas_error}"
+    return [], None, detail
+
+
+def _fetch_constituents_from_html_tables(
+    url: str,
+    *,
+    market_kind: str,
+    min_rows: int,
+    source_name: str,
+) -> tuple[pd.DataFrame, str, str | None]:
+    tables, source_label, error_text = _read_html_tables_with_fallback(
+        url,
+        headers=_html_request_headers(),
+    )
+    best = pd.DataFrame(columns=["Ticker", "Name"])
+    if not tables:
+        return best, source_name, error_text or f"{source_name} could not be parsed"
+    for table in tables:
+        constituents = _extract_constituent_frame(table, market_kind)
+        if constituents.shape[0] > best.shape[0]:
+            best = constituents
+        if constituents.shape[0] >= min_rows:
+            return constituents, f"{source_name} via {source_label or 'html'}", None
+    if best.empty:
+        return best, source_name, error_text or f"{source_name} contained no usable constituent table"
+    return best, f"{source_name} via {source_label or 'html'}", f"{source_name} returned {best.shape[0]} rows; expected at least {min_rows}"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_kospi200_constituents() -> tuple[pd.DataFrame, str, str | None]:
+    constituents, source_label, error_text = _fetch_constituents_from_html_tables(
+        BREADTH_THRUST_KOSPI200_SOURCE_URL,
+        market_kind="krx",
+        min_rows=180,
+        source_name="KOSPI 200 Wikipedia snapshot",
+    )
+    if not constituents.empty:
+        return constituents, source_label, None if constituents.shape[0] >= 180 else error_text
+    if fdr is None or not hasattr(fdr, "SnapDataReader"):
+        return constituents, source_label, error_text or "FinanceDataReader SnapDataReader is unavailable"
+    try:
+        snapshot = fdr.SnapDataReader("KRX/INDEX/STOCK/1028")
+    except Exception as exc:
+        fallback_error = str(exc)
+        detail = error_text or fallback_error
+        if error_text and fallback_error not in error_text:
+            detail = f"{error_text}; FinanceDataReader fallback failed: {fallback_error}"
+        return pd.DataFrame(columns=["Ticker", "Name"]), source_label, detail
+    fallback_constituents = _extract_constituent_frame(snapshot, "krx")
+    if fallback_constituents.empty:
+        detail = error_text or "KOSPI200 constituent snapshot returned no usable symbols"
+        return fallback_constituents, source_label, detail
+    return fallback_constituents, "FinanceDataReader KRX/INDEX/STOCK/1028", None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_sp500_constituents() -> tuple[pd.DataFrame, str, str | None]:
+    constituents, source_label, error_text = _fetch_constituents_from_html_tables(
+        BREADTH_THRUST_SP500_SOURCE_URL,
+        market_kind="us",
+        min_rows=450,
+        source_name="S&P 500 Wikipedia snapshot",
+    )
+    if not constituents.empty:
+        return constituents, source_label, None if constituents.shape[0] >= 450 else error_text
+    if fdr is None:
+        return constituents, source_label, error_text or "FinanceDataReader is unavailable"
+    try:
+        listing = fdr.StockListing("S&P500")
+    except Exception as exc:
+        fallback_error = str(exc)
+        detail = error_text or fallback_error
+        if error_text and fallback_error not in error_text:
+            detail = f"{error_text}; FinanceDataReader fallback failed: {fallback_error}"
+        return pd.DataFrame(columns=["Ticker", "Name"]), source_label, detail
+    fallback_constituents = _extract_constituent_frame(listing, "us")
+    if fallback_constituents.empty:
+        detail = error_text or "S&P 500 listing returned no usable symbols"
+        return fallback_constituents, source_label, detail
+    return fallback_constituents, "FinanceDataReader StockListing S&P500", None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_nasdaq100_constituents() -> tuple[pd.DataFrame, str, str | None]:
+    constituents, source_label, error_text = _fetch_constituents_from_html_tables(
+        BREADTH_THRUST_NASDAQ_SOURCE_URL,
+        market_kind="us",
+        min_rows=90,
+        source_name="Nasdaq-100 companies page",
+    )
+    if constituents.empty:
+        return constituents, source_label, error_text or "Nasdaq-100 table was present but contained no usable symbol list"
+    return constituents, source_label, None if constituents.shape[0] >= 90 else error_text
+
+
+def fetch_breadth_constituents(market_code: str) -> tuple[pd.DataFrame, str, str | None]:
+    if market_code == "KOSPI200":
+        return fetch_kospi200_constituents()
+    if market_code == "NASDAQ100":
+        return fetch_nasdaq100_constituents()
+    if market_code == "SP500":
+        return fetch_sp500_constituents()
+    return pd.DataFrame(columns=["Ticker", "Name"]), "Unknown", f"Unsupported breadth market {market_code}"
+
+
+def breadth_history_start(period: str) -> pd.Timestamp:
+    return history_window_start(period) - pd.Timedelta(days=BREADTH_THRUST_PAD_DAYS)
+
+
+def _extract_close_panel(raw: pd.DataFrame, expected_tickers: list[str]) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=expected_tickers)
+    if isinstance(raw.columns, pd.MultiIndex):
+        if "Close" in raw.columns.get_level_values(0):
+            close = raw["Close"].copy()
+        elif "Adj Close" in raw.columns.get_level_values(0):
+            close = raw["Adj Close"].copy()
+        else:
+            return pd.DataFrame(columns=expected_tickers)
+    else:
+        close_column = "Close" if "Close" in raw.columns else "Adj Close" if "Adj Close" in raw.columns else None
+        if close_column and len(expected_tickers) == 1:
+            close = raw[[close_column]].copy()
+            close.columns = [expected_tickers[0]]
+        else:
+            matching_columns = [ticker for ticker in expected_tickers if ticker in raw.columns]
+            if not matching_columns:
+                return pd.DataFrame(columns=expected_tickers)
+            close = raw[matching_columns].copy()
+    close.index = normalize_datetime_index(close.index)
+    close = close.apply(pd.to_numeric, errors="coerce").sort_index().ffill()
+    return close.reindex(columns=expected_tickers)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def download_breadth_price_panel(
+    tickers: tuple[str, ...],
+    period: str,
+    market_kind: str,
+) -> pd.DataFrame:
+    expected_tickers = list(tickers)
+    if not expected_tickers:
+        return pd.DataFrame(columns=expected_tickers)
+    start_date = breadth_history_start(period).strftime("%Y-%m-%d")
+    end_date = (pd.Timestamp.now().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    yahoo_panel = _download_yahoo_close_panel(
+        expected_tickers,
+        start_date=start_date,
+        end_date=end_date,
+        auto_adjust=True,
+    )
+    if not yahoo_panel.empty:
+        return yahoo_panel.reindex(columns=expected_tickers)
+
+    batch_size = BREADTH_THRUST_FETCH_BATCH_SIZE.get(market_kind, 60)
+    panels: list[pd.DataFrame] = []
+    for start_idx in range(0, len(expected_tickers), batch_size):
+        chunk = expected_tickers[start_idx:start_idx + batch_size]
+        try:
+            if market_kind == "krx":
+                if fdr is None:
+                    return pd.DataFrame(columns=expected_tickers)
+                raw = fdr.DataReader(",".join(chunk), start_date)
+            else:
+                if yf is None:
+                    return pd.DataFrame(columns=expected_tickers)
+                raw = yf.download(
+                    tickers=chunk,
+                    start=start_date,
+                    end=end_date,
+                    auto_adjust=True,
+                    progress=False,
+                    group_by="column",
+                    threads=False,
+                )
+        except Exception:
+            continue
+        panel_chunk = _extract_close_panel(raw, chunk)
+        if not panel_chunk.empty:
+            panels.append(panel_chunk)
+    if not panels:
+        return pd.DataFrame(columns=expected_tickers)
+    combined = pd.concat(panels, axis=1)
+    combined = combined.loc[:, ~combined.columns.duplicated(keep="first")]
+    combined.index = normalize_datetime_index(combined.index)
+    combined = combined.sort_index().ffill()
+    return combined.reindex(columns=expected_tickers)
+
+
+def detect_zweig_breadth_thrust(
+    breadth_ema: pd.Series,
+    *,
+    lookback: int = BREADTH_THRUST_SIGNAL_LOOKBACK,
+    lower_threshold: float = BREADTH_THRUST_LOWER_THRESHOLD,
+    upper_threshold: float = BREADTH_THRUST_UPPER_THRESHOLD,
+) -> pd.Series:
+    clean = pd.to_numeric(breadth_ema, errors="coerce")
+    prior_low = clean.shift(1).rolling(lookback, min_periods=lookback).min()
+    return (
+        clean.gt(upper_threshold)
+        & clean.shift(1).le(upper_threshold)
+        & prior_low.lt(lower_threshold)
+    ).fillna(False)
+
+
+def build_breadth_frame_from_close_panel(close_panel: pd.DataFrame) -> pd.DataFrame:
+    if close_panel is None or close_panel.empty:
+        return empty_breadth_frame()
+    panel = close_panel.copy().apply(pd.to_numeric, errors="coerce").sort_index()
+    daily_change = panel.diff()
+    sma200 = panel.rolling(200, min_periods=200).mean()
+    sma200_valid = sma200.notna()
+    sma200_distance = (panel / sma200) - 1
+    constituent_total = max(int(panel.shape[1]), 1)
+    advancers = (daily_change > 0).sum(axis=1)
+    decliners = (daily_change < 0).sum(axis=1)
+    unchanged = (daily_change == 0).sum(axis=1)
+    coverage = daily_change.notna().sum(axis=1)
+    breadth_ratio = advancers / (advancers + decliners).replace(0, np.nan)
+    breadth_ema10 = breadth_ratio.ewm(span=10, adjust=False, min_periods=10).mean()
+    sma200_coverage = sma200_valid.sum(axis=1)
+    above_sma200_count = (panel.gt(sma200) & sma200_valid).sum(axis=1)
+    above_sma200_ratio = above_sma200_count / sma200_coverage.replace(0, np.nan)
+    sma200_distance_mean = sma200_distance.mean(axis=1, skipna=True)
+    thrust_signal = detect_zweig_breadth_thrust(breadth_ema10)
+    frame = pd.DataFrame(
+        {
+            "advancers": advancers.astype(float),
+            "decliners": decliners.astype(float),
+            "unchanged": unchanged.astype(float),
+            "coverage": coverage.astype(float),
+            "coverage_ratio": coverage.astype(float) / constituent_total,
+            "breadth_ratio": breadth_ratio.astype(float),
+            "breadth_ema10": breadth_ema10.astype(float),
+            "sma200_coverage": sma200_coverage.astype(float),
+            "sma200_coverage_ratio": sma200_coverage.astype(float) / constituent_total,
+            "above_sma200_count": above_sma200_count.astype(float),
+            "above_sma200_ratio": above_sma200_ratio.astype(float),
+            "sma200_distance_mean": sma200_distance_mean.astype(float),
+            "thrust_signal": thrust_signal.astype(bool),
+        }
+    )
+    frame.index = normalize_datetime_index(frame.index)
+    return frame.loc[frame["coverage"] > 0].copy()
+
+
+def _market_failure_result(
+    market_code: str,
+    source_label: str,
+    error_text: str,
+) -> dict[str, Any]:
+    spec = BREADTH_THRUST_MARKET_SPECS[market_code]
+    return {
+        "label": spec["label"],
+        "constituents": pd.DataFrame(columns=["Ticker", "Name"]),
+        "coverage": {"latest_count": 0, "latest_ratio": np.nan, "constituent_count": 0},
+        "breadth_frame": empty_breadth_frame(),
+        "signals": empty_breadth_signals_frame(),
+        "latest": {},
+        "status": "failed",
+        "source": source_label,
+        "warning": None,
+        "error": error_text,
+    }
+
+
+def _summarize_breadth_market_result(
+    market_code: str,
+    constituents: pd.DataFrame,
+    source_label: str,
+    breadth_frame: pd.DataFrame,
+) -> dict[str, Any]:
+    spec = BREADTH_THRUST_MARKET_SPECS[market_code]
+    if breadth_frame.empty:
+        return _market_failure_result(market_code, source_label, "No usable breadth history was constructed")
+    latest_row = breadth_frame.iloc[-1]
+    signals = breadth_frame.loc[breadth_frame["thrust_signal"]].copy()
+    signal_frame = (
+        signals.reset_index()
+        .rename(
+            columns={
+                "index": "Date",
+                "breadth_ratio": "Breadth Ratio",
+                "breadth_ema10": "Breadth EMA10",
+                "coverage": "Coverage",
+                "coverage_ratio": "Coverage Ratio",
+            }
+        )[["Date", "Breadth Ratio", "Breadth EMA10", "Coverage", "Coverage Ratio"]]
+    )
+    latest_signal_date = None if signal_frame.empty else pd.Timestamp(signal_frame["Date"].iloc[-1]).strftime("%Y-%m-%d")
+    latest_ratio = float(latest_row["coverage_ratio"]) if not pd.isna(latest_row["coverage_ratio"]) else np.nan
+    latest_sma200_ratio = float(latest_row["sma200_coverage_ratio"]) if not pd.isna(latest_row["sma200_coverage_ratio"]) else np.nan
+    warning_messages: list[str] = []
+    if not np.isnan(latest_ratio) and latest_ratio < BREADTH_THRUST_LOW_COVERAGE_THRESHOLD:
+        warning_messages.append(f"Latest breadth coverage is {latest_ratio:.0%}, so signal quality is lower than full constituent coverage.")
+    if not np.isnan(latest_sma200_ratio) and latest_sma200_ratio < BREADTH_THRUST_LOW_COVERAGE_THRESHOLD:
+        warning_messages.append(f"Latest SMA200 coverage is {latest_sma200_ratio:.0%}, so 200DMA participation metrics reflect a reduced constituent sample.")
+    warning_text = " ".join(warning_messages) if warning_messages else None
+    return {
+        "label": spec["label"],
+        "constituents": constituents.copy(),
+        "coverage": {
+            "latest_count": int(latest_row["coverage"]),
+            "latest_ratio": latest_ratio,
+            "constituent_count": int(constituents.shape[0]),
+        },
+        "breadth_frame": breadth_frame.copy(),
+        "signals": signal_frame,
+        "latest": {
+            "breadth_ratio": float(latest_row["breadth_ratio"]) if not pd.isna(latest_row["breadth_ratio"]) else np.nan,
+            "breadth_ema10": float(latest_row["breadth_ema10"]) if not pd.isna(latest_row["breadth_ema10"]) else np.nan,
+            "signal_date": latest_signal_date,
+            "coverage_count": int(latest_row["coverage"]),
+            "coverage_ratio": latest_ratio,
+            "above_sma200_count": int(latest_row["above_sma200_count"]) if not pd.isna(latest_row["above_sma200_count"]) else 0,
+            "above_sma200_ratio": float(latest_row["above_sma200_ratio"]) if not pd.isna(latest_row["above_sma200_ratio"]) else np.nan,
+            "sma200_distance_mean": float(latest_row["sma200_distance_mean"]) if not pd.isna(latest_row["sma200_distance_mean"]) else np.nan,
+            "sma200_coverage_count": int(latest_row["sma200_coverage"]) if not pd.isna(latest_row["sma200_coverage"]) else 0,
+            "sma200_coverage_ratio": latest_sma200_ratio,
+        },
+        "status": "partial" if warning_text else "ok",
+        "source": source_label,
+        "warning": warning_text,
+        "error": None,
+    }
+
+
+def build_breadth_payload(params: dict[str, Any], market_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    comparison_frames: list[pd.DataFrame] = []
+    diagnostics_rows: list[dict[str, Any]] = []
+    for market_code in BREADTH_THRUST_MARKET_ORDER:
+        if market_code not in market_results:
+            continue
+        result = market_results[market_code]
+        frame = result.get("breadth_frame")
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            comparison = frame[
+                [
+                    "breadth_ratio",
+                    "breadth_ema10",
+                    "thrust_signal",
+                    "above_sma200_ratio",
+                    "sma200_distance_mean",
+                    "sma200_coverage_ratio",
+                ]
+            ].copy().reset_index()
+            comparison = comparison.rename(columns={"index": "date"})
+            comparison["market_code"] = market_code
+            comparison["market_label"] = result["label"]
+            comparison_frames.append(comparison)
+        latest = result.get("latest", {})
+        diagnostics_rows.append(
+            {
+                "Market": result["label"],
+                "Status": result.get("status", "unknown"),
+                "Constituents": result.get("coverage", {}).get("constituent_count", 0),
+                "Latest Coverage": result.get("coverage", {}).get("latest_count", 0),
+                "Coverage Ratio": result.get("coverage", {}).get("latest_ratio", np.nan),
+                "Latest EMA10": latest.get("breadth_ema10", np.nan),
+                "Latest >SMA200": latest.get("above_sma200_ratio", np.nan),
+                "Latest Avg Dist": latest.get("sma200_distance_mean", np.nan),
+                "SMA200 Coverage": latest.get("sma200_coverage_ratio", np.nan),
+                "Latest Signal": latest.get("signal_date") or "n/a",
+                "Source": result.get("source", "n/a"),
+                "Warning": result.get("warning") or "",
+                "Error": result.get("error") or "",
+            }
+        )
+    comparison_frame = pd.concat(comparison_frames, ignore_index=True) if comparison_frames else pd.DataFrame(
+        columns=[
+            "date",
+            "breadth_ratio",
+            "breadth_ema10",
+            "thrust_signal",
+            "above_sma200_ratio",
+            "sma200_distance_mean",
+            "sma200_coverage_ratio",
+            "market_code",
+            "market_label",
+        ]
+    )
+    return {
+        "params": params,
+        "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "comparison_frame": comparison_frame,
+        "market_results": market_results,
+        "diagnostics": pd.DataFrame(diagnostics_rows),
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_single_market_breadth_result(market_code: str, period: str) -> dict[str, Any]:
+    constituents, source_label, error_text = fetch_breadth_constituents(market_code)
+    if error_text and constituents.empty:
+        return _market_failure_result(market_code, source_label, error_text)
+    if constituents.empty:
+        return _market_failure_result(market_code, source_label, "Constituent snapshot returned no rows")
+    tickers = tuple(dedupe_preserve_order(constituents["Ticker"].astype(str).tolist()))
+    market_kind = BREADTH_THRUST_MARKET_SPECS[market_code]["kind"]
+    close_panel = download_breadth_price_panel(tickers, period, market_kind)
+    if close_panel.empty:
+        return _market_failure_result(market_code, source_label, "Price panel download returned no usable close history")
+    breadth_frame = build_breadth_frame_from_close_panel(close_panel)
+    if breadth_frame.empty:
+        return _market_failure_result(market_code, source_label, "Breadth statistics could not be constructed from the downloaded prices")
+    breadth_frame = trim_to_history_window(breadth_frame, period=period).copy()
+    if breadth_frame.empty:
+        return _market_failure_result(market_code, source_label, "Breadth statistics were outside the requested history window")
+    return _summarize_breadth_market_result(market_code, constituents, source_label, breadth_frame)
+
+
+def run_breadth_thrust_query(
+    market_codes: list[str],
+    period: str,
+    *,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    selected_codes = [code for code in market_codes if code in BREADTH_THRUST_MARKET_SPECS]
+    market_results: dict[str, dict[str, Any]] = {}
+    total = max(len(selected_codes), 1)
+    for index, market_code in enumerate(selected_codes, start=1):
+        if callable(progress_callback):
+            progress_callback(index - 1, total, market_code, f"Loading {BREADTH_THRUST_MARKET_SPECS[market_code]['label']} breadth and 200DMA metrics...")
+        market_results[market_code] = compute_single_market_breadth_result(market_code, period)
+        if callable(progress_callback):
+            progress_callback(index, total, market_code, f"Completed {BREADTH_THRUST_MARKET_SPECS[market_code]['label']} breadth and 200DMA metrics.")
+    return build_breadth_payload({"markets": selected_codes, "period": period}, market_results)
+
+
+def _breadth_market_color(market_code: str) -> str:
+    color_map = {
+        "KOSPI200": "#0f766e",
+        "NASDAQ100": "#2563eb",
+        "SP500": "#dd6b20",
+    }
+    return color_map.get(market_code, "#102a43")
+
+
+def build_breadth_thrust_comparison_figure(payload: dict[str, Any]) -> go.Figure:
+    comparison_frame = payload.get("comparison_frame", pd.DataFrame())
+    fig = go.Figure()
+    if comparison_frame.empty:
+        return apply_figure_style(fig, title="Breadth Thrust Comparison", height=760)
+    for market_code in BREADTH_THRUST_MARKET_ORDER:
+        result = payload["market_results"].get(market_code)
+        if not result:
+            continue
+        frame = result["breadth_frame"]
+        if frame.empty:
+            continue
+        color = _breadth_market_color(market_code)
+        fig.add_trace(
+            go.Scatter(
+                x=frame.index,
+                y=frame["breadth_ema10"],
+                name=result["label"],
+                line=dict(color=color, width=2.5),
+            )
+        )
+        signal_frame = frame.loc[frame["thrust_signal"]]
+        if not signal_frame.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=signal_frame.index,
+                    y=signal_frame["breadth_ema10"],
+                    name=f"{result['label']} signal",
+                    mode="markers",
+                    marker=dict(color=color, size=10, symbol="diamond"),
+                    showlegend=False,
+                )
+            )
+    fig.add_hline(y=BREADTH_THRUST_LOWER_THRESHOLD, line_color="#64748b", line_width=1, line_dash="dot")
+    fig.add_hline(y=BREADTH_THRUST_UPPER_THRESHOLD, line_color="#b42318", line_width=1.2, line_dash="dash")
+    fig = apply_figure_style(fig, title="Zweig Breadth Thrust Comparison", height=760, legend_y=1.08)
+    fig.update_yaxes(tickformat=".0%", range=[0, 1])
+    return fig
+
+
+def build_mobile_breadth_thrust_comparison_figure(payload: dict[str, Any]) -> Any:
+    fig, ax = plt.subplots(figsize=(6.4, 4.6), constrained_layout=True)
+    has_trace = False
+    for market_code in BREADTH_THRUST_MARKET_ORDER:
+        result = payload["market_results"].get(market_code)
+        if not result:
+            continue
+        frame = result["breadth_frame"]
+        if frame.empty:
+            continue
+        has_trace = True
+        color = _breadth_market_color(market_code)
+        ax.plot(frame.index, frame["breadth_ema10"], color=color, linewidth=1.8, label=result["label"])
+        signal_frame = frame.loc[frame["thrust_signal"]]
+        if not signal_frame.empty:
+            ax.scatter(signal_frame.index, signal_frame["breadth_ema10"], color=color, s=18, marker="D")
+    if has_trace:
+        ax.axhline(BREADTH_THRUST_LOWER_THRESHOLD, color="#64748b", linestyle=":", linewidth=1)
+        ax.axhline(BREADTH_THRUST_UPPER_THRESHOLD, color="#b42318", linestyle="--", linewidth=1)
+        ax.set_ylim(0, 1)
+        ax.legend(loc="upper left", fontsize=8, frameon=False)
+    _mobile_style_axis(ax, "EMA10")
+    return _mobile_finalize_figure(fig)
+
+
+def _build_breadth_metric_comparison_figure(
+    payload: dict[str, Any],
+    *,
+    column: str,
+    title: str,
+    ylabel: str,
+    baseline: float | None = None,
+    baseline_color: str = "#64748b",
+    baseline_dash: str = "dot",
+    y_range: list[float] | None = None,
+) -> go.Figure:
+    comparison_frame = payload.get("comparison_frame", pd.DataFrame())
+    fig = go.Figure()
+    if comparison_frame.empty:
+        return apply_figure_style(fig, title=title, height=680)
+    has_trace = False
+    for market_code in BREADTH_THRUST_MARKET_ORDER:
+        result = payload["market_results"].get(market_code)
+        if not result:
+            continue
+        frame = result["breadth_frame"]
+        if frame.empty or column not in frame.columns:
+            continue
+        metric_frame = frame[[column]].dropna()
+        if metric_frame.empty:
+            continue
+        has_trace = True
+        fig.add_trace(
+            go.Scatter(
+                x=metric_frame.index,
+                y=metric_frame[column],
+                name=result["label"],
+                line=dict(color=_breadth_market_color(market_code), width=2.4),
+            )
+        )
+    if baseline is not None and has_trace:
+        fig.add_hline(y=baseline, line_color=baseline_color, line_width=1.1, line_dash=baseline_dash)
+    fig = apply_figure_style(fig, title=title, height=680, legend_y=1.08)
+    fig.update_yaxes(title_text=ylabel, tickformat=".0%")
+    if y_range is not None:
+        fig.update_yaxes(range=y_range)
+    return fig
+
+
+def _build_mobile_breadth_metric_comparison_figure(
+    payload: dict[str, Any],
+    *,
+    column: str,
+    ylabel: str,
+    baseline: float | None = None,
+    baseline_color: str = "#64748b",
+    baseline_style: str = ":",
+    y_range: tuple[float, float] | None = None,
+) -> Any:
+    fig, ax = plt.subplots(figsize=(6.4, 4.4), constrained_layout=True)
+    has_trace = False
+    for market_code in BREADTH_THRUST_MARKET_ORDER:
+        result = payload["market_results"].get(market_code)
+        if not result:
+            continue
+        frame = result["breadth_frame"]
+        if frame.empty or column not in frame.columns:
+            continue
+        metric_frame = frame[[column]].dropna()
+        if metric_frame.empty:
+            continue
+        has_trace = True
+        ax.plot(metric_frame.index, metric_frame[column], color=_breadth_market_color(market_code), linewidth=1.8, label=result["label"])
+    if has_trace and baseline is not None:
+        ax.axhline(baseline, color=baseline_color, linestyle=baseline_style, linewidth=1)
+    if has_trace and y_range is not None:
+        ax.set_ylim(*y_range)
+    if has_trace:
+        ax.legend(loc="upper left", fontsize=8, frameon=False)
+    _mobile_style_axis(ax, ylabel)
+    return _mobile_finalize_figure(fig)
+
+
+def build_breadth_above_sma200_comparison_figure(payload: dict[str, Any]) -> go.Figure:
+    return _build_breadth_metric_comparison_figure(
+        payload,
+        column="above_sma200_ratio",
+        title="% Constituents Above 200DMA",
+        ylabel="Share Above 200DMA",
+        baseline=0.50,
+        baseline_color="#334155",
+        baseline_dash="dash",
+        y_range=[0, 1],
+    )
+
+
+def build_mobile_breadth_above_sma200_comparison_figure(payload: dict[str, Any]) -> Any:
+    return _build_mobile_breadth_metric_comparison_figure(
+        payload,
+        column="above_sma200_ratio",
+        ylabel=">200DMA",
+        baseline=0.50,
+        baseline_color="#334155",
+        baseline_style="--",
+        y_range=(0, 1),
+    )
+
+
+def build_breadth_sma200_distance_comparison_figure(payload: dict[str, Any]) -> go.Figure:
+    return _build_breadth_metric_comparison_figure(
+        payload,
+        column="sma200_distance_mean",
+        title="Average Distance from 200DMA",
+        ylabel="Average Distance",
+        baseline=0.0,
+        baseline_color="#334155",
+        baseline_dash="dash",
+    )
+
+
+def build_mobile_breadth_sma200_distance_comparison_figure(payload: dict[str, Any]) -> Any:
+    return _build_mobile_breadth_metric_comparison_figure(
+        payload,
+        column="sma200_distance_mean",
+        ylabel="Avg Dist",
+        baseline=0.0,
+        baseline_color="#334155",
+        baseline_style="--",
+    )
+
+
+def _breadth_card_tone(latest: dict[str, Any]) -> str:
+    ema_value = latest.get("breadth_ema10", np.nan)
+    if np.isnan(ema_value):
+        return "neutral"
+    if ema_value >= BREADTH_THRUST_UPPER_THRESHOLD:
+        return "bull"
+    if ema_value <= BREADTH_THRUST_LOWER_THRESHOLD:
+        return "bear"
+    return "accent"
+
+
+def render_breadth_thrust_results(payload: dict[str, Any]) -> None:
+    market_results = payload.get("market_results", {})
+    ordered_codes = [code for code in BREADTH_THRUST_MARKET_ORDER if code in market_results]
+    usable_codes = [
+        code
+        for code in ordered_codes
+        if isinstance(market_results[code].get("breadth_frame"), pd.DataFrame)
+        and not market_results[code]["breadth_frame"].empty
+    ]
+    if not usable_codes:
+        st.warning("No usable breadth thrust market results were returned.")
+        diagnostics = payload.get("diagnostics")
+        if isinstance(diagnostics, pd.DataFrame) and not diagnostics.empty:
+            st.dataframe(diagnostics, use_container_width=True, hide_index=True)
+        return
+
+    summary_cards = st.columns(len(usable_codes))
+    for column, market_code in zip(summary_cards, usable_codes):
+        result = market_results[market_code]
+        latest = result["latest"]
+        signal_date = latest.get("signal_date") or "n/a"
+        subtitle = (
+            f"Breadth {format_ratio_pct(latest.get('breadth_ratio', np.nan))} | "
+            f"&gt;200DMA {format_ratio_pct(latest.get('above_sma200_ratio', np.nan))}"
+            "<br>"
+            f"Avg Dist {format_pct(latest.get('sma200_distance_mean', np.nan))} | "
+            f"Signal {signal_date}"
+        )
+        with column:
+            render_metric_card(
+                result["label"],
+                f"EMA10 {format_ratio_pct(latest.get('breadth_ema10', np.nan))}",
+                subtitle,
+                _breadth_card_tone(latest),
+            )
+
+    for market_code in ordered_codes:
+        result = market_results[market_code]
+        if result.get("error"):
+            st.warning(f"{result['label']}: {result['error']}")
+        elif result.get("warning"):
+            st.info(f"{result['label']}: {result['warning']}")
+
+    st.markdown(
+        '<div class="section-note">Current constituent snapshots are used for all three indices, so historical thrust signals carry survivorship bias. The threshold rule follows Zweig breadth thrust: 10-day EMA of breadth rising above 61.5% after printing below 40% within the prior 10 trading sessions. 200DMA participation and average-distance metrics only use constituents with a valid 200-day moving average on each date.</div>',
+        unsafe_allow_html=True,
+    )
+    render_chart(
+        "Zweig Breadth Thrust Comparison",
+        build_breadth_thrust_comparison_figure(payload),
+        mobile_builder=lambda: build_mobile_breadth_thrust_comparison_figure(payload),
+    )
+    render_chart(
+        "% Constituents Above 200DMA",
+        build_breadth_above_sma200_comparison_figure(payload),
+        mobile_builder=lambda: build_mobile_breadth_above_sma200_comparison_figure(payload),
+    )
+    render_chart(
+        "Average Distance from 200DMA",
+        build_breadth_sma200_distance_comparison_figure(payload),
+        mobile_builder=lambda: build_mobile_breadth_sma200_distance_comparison_figure(payload),
+    )
+
+    detail_tabs = st.tabs([market_results[code]["label"] for code in usable_codes])
+    for tab, market_code in zip(detail_tabs, usable_codes):
+        result = market_results[market_code]
+        breadth_frame = result["breadth_frame"].copy()
+        signals_frame = result["signals"].copy()
+        with tab:
+            detail_left, detail_right = st.columns([0.95, 1.05])
+            with detail_left:
+                st.markdown("#### Recent thrust signals")
+                if signals_frame.empty:
+                    st.info("No Zweig breadth thrust signal has been detected inside this history window.")
+                else:
+                    signal_view = signals_frame.copy()
+                    signal_view["Date"] = pd.to_datetime(signal_view["Date"]).dt.strftime("%Y-%m-%d")
+                    signal_view["Breadth Ratio"] = signal_view["Breadth Ratio"].map(format_ratio_pct)
+                    signal_view["Breadth EMA10"] = signal_view["Breadth EMA10"].map(format_ratio_pct)
+                    signal_view["Coverage Ratio"] = signal_view["Coverage Ratio"].map(format_ratio_pct)
+                    st.dataframe(signal_view.sort_values("Date", ascending=False), use_container_width=True, hide_index=True)
+            with detail_right:
+                st.markdown("#### Recent breadth + 200DMA tape")
+                tape_view = (
+                    breadth_frame.tail(15)
+                    .rename_axis("Date")
+                    .reset_index()
+                    .rename(
+                        columns={
+                            "advancers": "Advancers",
+                            "decliners": "Decliners",
+                            "unchanged": "Unchanged",
+                            "coverage": "Coverage",
+                            "coverage_ratio": "Coverage Ratio",
+                            "breadth_ratio": "Breadth Ratio",
+                            "breadth_ema10": "Breadth EMA10",
+                            "sma200_coverage": "SMA200 Coverage",
+                            "above_sma200_count": ">SMA200 Count",
+                            "above_sma200_ratio": ">SMA200 Ratio",
+                            "sma200_distance_mean": "Avg Dist to SMA200",
+                            "thrust_signal": "Signal",
+                        }
+                    )
+                )
+                tape_view["Date"] = pd.to_datetime(tape_view["Date"]).dt.strftime("%Y-%m-%d")
+                tape_view["Coverage Ratio"] = tape_view["Coverage Ratio"].map(format_ratio_pct)
+                tape_view["Breadth Ratio"] = tape_view["Breadth Ratio"].map(format_ratio_pct)
+                tape_view["Breadth EMA10"] = tape_view["Breadth EMA10"].map(format_ratio_pct)
+                tape_view[">SMA200 Ratio"] = tape_view[">SMA200 Ratio"].map(format_ratio_pct)
+                tape_view["Avg Dist to SMA200"] = tape_view["Avg Dist to SMA200"].map(format_pct)
+                tape_view["Signal"] = tape_view["Signal"].map(lambda flag: "Yes" if bool(flag) else "")
+                st.dataframe(tape_view, use_container_width=True, hide_index=True)
+            with st.expander(f"{result['label']} constituent snapshot", expanded=False):
+                st.dataframe(result["constituents"], use_container_width=True, hide_index=True)
+
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, pd.DataFrame) and not diagnostics.empty:
+        diagnostics_view = diagnostics.copy()
+        diagnostics_view["Coverage Ratio"] = diagnostics_view["Coverage Ratio"].map(format_ratio_pct)
+        diagnostics_view["Latest EMA10"] = diagnostics_view["Latest EMA10"].map(format_ratio_pct)
+        diagnostics_view["Latest >SMA200"] = diagnostics_view["Latest >SMA200"].map(format_ratio_pct)
+        diagnostics_view["Latest Avg Dist"] = diagnostics_view["Latest Avg Dist"].map(format_pct)
+        diagnostics_view["SMA200 Coverage"] = diagnostics_view["SMA200 Coverage"].map(format_ratio_pct)
+        st.markdown("#### Breadth diagnostics")
+        st.dataframe(diagnostics_view, use_container_width=True, hide_index=True)
+
+
+def render_breadth_thrust_dashboard(period: str) -> None:
+    render_special_dashboard_header(
+        "Breadth Thrust",
+        "Measure Zweig breadth thrust, 200DMA participation, and average 200DMA distance across KOSPI200, Nasdaq-100, and S&P 500 without loading the main ticker stack first.",
+        history_window=period,
+        load_mode="On demand",
+        load_subtitle="Runs only after pressing Query so the page stays responsive.",
+        source_summary="Current constituent snapshots",
+    )
+    st.markdown(
+        '<div class="section-note">Select one or more markets, then press <strong>Query</strong>. Zweig breadth thrust plus 200DMA participation metrics run only on demand, and the previous successful result stays on screen until the new run completes.</div>',
+        unsafe_allow_html=True,
+    )
+
+    default_markets = st.session_state.get(BREADTH_THRUST_SESSION_PARAMS_KEY, {}).get("markets", BREADTH_THRUST_MARKET_ORDER)
+    if "breadth_thrust_market_select" not in st.session_state:
+        st.session_state["breadth_thrust_market_select"] = list(default_markets)
+
+    with st.form("breadth_thrust_query_form", clear_on_submit=False):
+        query_col, info_col = st.columns([1.3, 0.7], gap="large")
+        with query_col:
+            selected_markets = st.multiselect(
+                "Markets",
+                options=BREADTH_THRUST_MARKET_ORDER,
+                key="breadth_thrust_market_select",
+                format_func=lambda market_code: BREADTH_THRUST_MARKET_SPECS[market_code]["label"],
+            )
+        with info_col:
+            st.markdown("#### Query settings")
+            st.caption(f"History window: {period.upper()}")
+            st.caption("Breadth definition: Zweig 10-day EMA thrust + 200DMA participation")
+        submitted = st.form_submit_button("Query")
+
+    current_selection = st.session_state.get("breadth_thrust_market_select", list(default_markets))
+    last_params = st.session_state.get(BREADTH_THRUST_SESSION_PARAMS_KEY)
+    result_placeholder = st.empty()
+    last_result = st.session_state.get(BREADTH_THRUST_SESSION_RESULT_KEY)
+    if last_result:
+        if (
+            isinstance(last_params, dict)
+            and (last_params.get("markets") != current_selection or last_params.get("period") != period)
+        ):
+            markets_text = ", ".join(BREADTH_THRUST_MARKET_SPECS[code]["label"] for code in last_params.get("markets", []))
+            st.caption(f"Showing last successful breadth + 200DMA query for {markets_text} / {str(last_params.get('period', period)).upper()} until Query is pressed again.")
+        with result_placeholder.container():
+            render_breadth_thrust_results(last_result)
+    elif not st.session_state.get(BREADTH_THRUST_SESSION_REQUEST_KEY):
+        with result_placeholder.container():
+            st.info("Choose one or more markets and press Query to build the breadth + 200DMA dashboard.")
+
+    if not submitted:
+        return
+
+    st.session_state[BREADTH_THRUST_SESSION_REQUEST_KEY] = True
+    if not selected_markets:
+        st.warning("Select at least one market before running the breadth thrust query.")
+        return
+
+    status_placeholder = st.empty()
+    progress_bar = st.progress(0)
+
+    def _update_progress(completed: int, total: int, market_code: str, message: str) -> None:
+        progress_bar.progress(min(int((completed / max(total, 1)) * 100), 100))
+        status_placeholder.info(message)
+
+    payload = run_breadth_thrust_query(selected_markets, period, progress_callback=_update_progress)
+    usable_market_count = sum(
+        1
+        for result in payload["market_results"].values()
+        if isinstance(result.get("breadth_frame"), pd.DataFrame) and not result["breadth_frame"].empty
+    )
+    progress_bar.empty()
+    if usable_market_count == 0:
+        status_placeholder.error("Breadth + 200DMA query did not return any usable market results.")
+        return
+
+    status_placeholder.success(f"Breadth + 200DMA query completed for {usable_market_count} market(s).")
+    st.session_state[BREADTH_THRUST_SESSION_RESULT_KEY] = payload
+    st.session_state[BREADTH_THRUST_SESSION_PARAMS_KEY] = payload["params"]
+    result_placeholder.empty()
+    with result_placeholder.container():
+        render_breadth_thrust_results(payload)
 
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -4847,6 +6282,10 @@ def format_bps(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.1f} bps"
 
 
+def format_ratio_pct(value: float) -> str:
+    return "n/a" if np.isnan(value) else f"{value * 100:.2f}%"
+
+
 def format_pct(value: float) -> str:
     return "n/a" if np.isnan(value) else f"{value * 100:+.2f}%"
 
@@ -4931,12 +6370,11 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         value=st.session_state.get("ticker", default_ticker),
         key="ticker_input",
     ).strip().upper()
-    period_options = ["1y", "2y", "3y", "5y"]
     default_period = st.session_state.get("period", LOOKBACK_PERIOD)
     period = st.sidebar.selectbox(
         "History window",
-        options=period_options,
-        index=period_options.index(default_period) if default_period in period_options else period_options.index(LOOKBACK_PERIOD),
+        options=HISTORY_WINDOW_OPTIONS,
+        index=HISTORY_WINDOW_OPTIONS.index(default_period) if default_period in HISTORY_WINDOW_OPTIONS else HISTORY_WINDOW_OPTIONS.index(LOOKBACK_PERIOD),
         key="period_select",
     )
     last_core_view = st.session_state.get("last_core_view", CORE_DASHBOARD_VIEWS[0])
@@ -4951,19 +6389,59 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         <div class="sidebar-section-card">
             <div class="sidebar-section-eyebrow">Quick Access</div>
             <div class="sidebar-section-title">Special dashboards</div>
-            <div class="sidebar-section-copy">Open cross-asset pulse, canary regime, SPX dealer gamma, ETF leadership, JHEQX collar reconstruction, or Fed/Treasury liquidity plumbing without touching the main chart picker.</div>
+            <div class="sidebar-section-copy">Use a compact selector to open macro, derivatives, and leadership dashboards without stacking more sidebar buttons. Breadth Thrust stays on-demand until Query is pressed inside the dashboard.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    current_special_selection = st.session_state.get("special_dashboard_select", SPECIAL_ACTION_BUTTONS[0]["view"])
+    if current_special_selection not in SPECIAL_ACTION_CONFIG:
+        current_special_selection = SPECIAL_ACTION_BUTTONS[0]["view"]
+        st.session_state["special_dashboard_select"] = current_special_selection
+    selected_meta = SPECIAL_ACTION_CONFIG[current_special_selection]
+    default_special_category = st.session_state.get("special_category_select", selected_meta["category"])
+    if default_special_category not in SPECIAL_ACTION_CATEGORIES:
+        default_special_category = selected_meta["category"]
+        st.session_state["special_category_select"] = default_special_category
+    special_category = st.sidebar.selectbox(
+        "Special Dashboard Group",
+        options=SPECIAL_ACTION_CATEGORIES,
+        index=SPECIAL_ACTION_CATEGORIES.index(default_special_category),
+        key="special_category_select",
+    )
+    special_category_views = [item["view"] for item in SPECIAL_ACTION_BUTTONS if item["category"] == special_category]
+    selected_special_view = st.session_state.get("special_dashboard_select", special_category_views[0])
+    if selected_special_view not in special_category_views:
+        selected_special_view = special_category_views[0]
+        st.session_state["special_dashboard_select"] = selected_special_view
+    selected_special_view = st.sidebar.selectbox(
+        "Special Dashboard",
+        options=special_category_views,
+        index=special_category_views.index(selected_special_view),
+        key="special_dashboard_select",
+        format_func=display_view_name,
+    )
+    selected_special_meta = SPECIAL_ACTION_CONFIG[selected_special_view]
+    st.sidebar.markdown(
+        f"""
+        <div class="sidebar-section-card">
+            <div class="sidebar-section-eyebrow">{selected_special_meta["category"]}</div>
+            <div class="sidebar-section-title">{selected_special_meta["label"]}</div>
+            <div class="sidebar-section-copy">{selected_special_meta["caption"]}</div>
+            <div class="sidebar-selection-note">Load mode: {"Query button" if selected_special_meta["manual_run"] else "Open dashboard"}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    action_cols = st.sidebar.columns(2, gap="small")
     clicked_special_view = None
-    for action in SPECIAL_ACTION_BUTTONS:
-        button_col, text_col = st.sidebar.columns([1.15, 1.0], gap="small")
-        with button_col:
-            if st.button(action["label"], key=f"special_action_{action['view']}", use_container_width=True):
-                clicked_special_view = action["view"]
-        with text_col:
-            st.markdown(f'<div class="quick-action-row-copy">{action["caption"]}</div>', unsafe_allow_html=True)
+    return_to_core = False
+    with action_cols[0]:
+        if st.button("Open Special", key="open_selected_special_dashboard", use_container_width=True):
+            clicked_special_view = selected_special_view
+    with action_cols[1]:
+        if st.button("Core Charts", key="return_to_core_dashboard", use_container_width=True):
+            return_to_core = True
     force_refresh = st.sidebar.checkbox("Force refresh cached data", value=False, key="force_refresh_toggle")
     if force_refresh:
         st.cache_data.clear()
@@ -4988,10 +6466,14 @@ def render_sidebar(default_ticker: str) -> tuple[str, str, str, str | None, dict
         active_view = core_view
     if clicked_special_view:
         active_view = clicked_special_view
+    if return_to_core:
+        active_view = core_view
     st.session_state["last_core_view"] = core_view
     st.session_state["dashboard_view"] = active_view
     if active_view in SPECIAL_ACTION_LABELS:
-        st.sidebar.caption(f"Active quick view: {display_view_name(active_view)}")
+        st.sidebar.caption(f"Active special view: {display_view_name(active_view)}")
+    else:
+        st.sidebar.caption(f"Active core chart: {display_view_name(active_view)}")
     if active_view == "JHEQX Collar":
         st.sidebar.caption(f"Fixed history window: latest {JHEQX_QUARTER_LIMIT} quarters")
 
@@ -5087,10 +6569,20 @@ def build_signal_stack(
     )
 
 
-def main() -> None:
-    configure_page()
-    apply_custom_style()
-    ticker, period, active_view, selected_expiry, spx_payload, sortino_top_n = render_sidebar(default_ticker="NVDA")
+def render_special_dashboard_view(
+    active_view: str,
+    period: str,
+    selected_expiry: str | None,
+    spx_payload: dict[str, Any] | None,
+    sortino_top_n: int,
+) -> bool:
+    if active_view not in TICKER_INDEPENDENT_SPECIAL_VIEWS:
+        return False
+
+    if active_view == "Breadth Thrust":
+        render_breadth_thrust_dashboard(period)
+        st.caption("Data sources: FinanceDataReader KOSPI200 and S&P 500 snapshots, Nasdaq-100 companies page, and Yahoo Finance / FinanceDataReader price history.")
+        return True
 
     if active_view == "JHEQX Collar":
         with st.spinner("Loading JHEQX collar dashboard..."):
@@ -5108,29 +6600,148 @@ def main() -> None:
                 st.dataframe(failure_state["diagnostics"], use_container_width=True, hide_index=True)
             with st.expander("JHEQX source review", expanded=False):
                 st.dataframe(failure_state["source_review"], use_container_width=True, hide_index=True)
-            st.stop()
+            return True
         render_jheqx_collar_header(jheqx_data)
         st.markdown(
-            f'<div class="section-note">Active view: <strong>JHEQX Collar</strong>. This quick view runs independently from the ticker chart stack and is fixed to the latest {JHEQX_QUARTER_LIMIT} quarters.</div>',
+            f'<div class="section-note">Active view: <strong>JHEQX Collar</strong>. This special dashboard is fixed to the latest {JHEQX_QUARTER_LIMIT} quarters and runs independently from ticker charts.</div>',
             unsafe_allow_html=True,
         )
         render_jheqx_collar_dashboard(jheqx_data)
         st.caption("Data sources: SEC N-PORT filings, J.P. Morgan public holdings PDFs, NEOS issuer holdings disclosures, and Yahoo Finance index history.")
-        return
+        return True
 
     if active_view == "Fed Watch":
         with st.spinner("Loading Fed Watch data..."):
             fed_watch_data = fetch_fed_watch_data(period)
         if not fed_watch_data:
             st.error("Fed Watch could not load usable FRED data for the selected history window.")
-            st.stop()
+            return True
         render_fed_watch_header(fed_watch_data)
-        st.markdown(
-            '<div class="section-note">Active view: <strong>Fed Watch</strong>. This quick view runs independently from the ticker chart stack and uses the shared history window as its macro lookback.</div>',
-            unsafe_allow_html=True,
-        )
         render_fed_watch_dashboard(fed_watch_data)
         st.caption("Data sources: FRED series for SOFR, reserve balances, Treasury cash, reverse repo usage, Treasury yields, and bank/Fed Treasury holdings.")
+        return True
+
+    if active_view == "Canary Momentum":
+        render_special_dashboard_header(
+            active_view,
+            "Compare completed-month and live canary momentum to gauge whether a risk-on basket still deserves capital.",
+            history_window=period,
+            load_mode="Immediate",
+            load_subtitle="Loads when the dashboard is opened.",
+            source_summary="Yahoo Finance macro basket",
+        )
+        with st.spinner("Loading canary momentum dashboard..."):
+            canary_data = compute_canary_momentum_dashboard(period=period)
+        if not canary_data:
+            st.info("Canary momentum data could not be loaded from Yahoo Finance for the required universe.")
+            return True
+        render_canary_dashboard(canary_data)
+        st.caption("Data sources: Yahoo Finance close history for the canary and attack universes.")
+        return True
+
+    if active_view == "Market Pulse":
+        render_special_dashboard_header(
+            active_view,
+            "Read cross-asset internal health from equity breadth, sector leadership, credit, volatility, and dollar inputs.",
+            history_window=period,
+            load_mode="Immediate",
+            load_subtitle="Loads when the dashboard is opened.",
+            source_summary="Yahoo Finance cross-asset basket",
+        )
+        with st.spinner("Loading macro pulse dashboard..."):
+            market_data = compute_market_fear_greed()
+        if not market_data:
+            st.info("Fear & Greed data could not be loaded from Yahoo Finance for the required macro basket.")
+            return True
+        if mobile_charts_enabled():
+            st.markdown("#### Macro Fear and Greed Dashboard")
+            market_fig = build_mobile_market_figure(market_data)
+            st.pyplot(market_fig, use_container_width=True)
+            plt.close(market_fig)
+        else:
+            render_plotly_chart(build_market_figure(market_data))
+        st.caption("Data sources: Yahoo Finance for SPY, VIX, HYG, IEF, RSP, XLY, XLP, and UUP.")
+        return True
+
+    if active_view == "Options Flow":
+        render_special_dashboard_header(
+            active_view,
+            "Inspect SPX dealer positioning, max pain, gamma flip, and related volatility context without loading a ticker chart.",
+            history_window=None,
+            load_mode="Immediate",
+            load_subtitle="Loads when the dashboard is opened.",
+            source_summary="CBOE delayed quotes",
+        )
+        payload = spx_payload or fetch_spx_options_payload()
+        expiries = extract_spx_expiries(payload)
+        active_expiry = selected_expiry or nearest_spx_expiry(expiries) if expiries else None
+        with st.spinner("Loading SPX options analytics..."):
+            options_data = compute_options_analytics(expiry=active_expiry, payload=payload) if active_expiry else None
+        if not options_data:
+            st.info("SPX option data could not be loaded from the CBOE delayed quotes feed.")
+            return True
+        zero_gamma_level = float(options_data.get("zero_gamma_level", np.nan))
+        zero_gamma_value = "n/a" if np.isnan(zero_gamma_level) else f"{zero_gamma_level:,.1f}"
+        zero_gamma_subtitle = (
+            "No gamma sign change found"
+            if np.isnan(zero_gamma_level)
+            else "Spot above gamma flip"
+            if options_data["spot"] >= zero_gamma_level
+            else "Spot below gamma flip"
+        )
+        zero_gamma_tone = (
+            "neutral"
+            if np.isnan(zero_gamma_level)
+            else "bull"
+            if options_data["spot"] >= zero_gamma_level
+            else "bear"
+        )
+        option_cards = st.columns(5)
+        with option_cards[0]:
+            render_metric_card("Underlying", f"{options_data['underlying']} {options_data['spot']:,.1f}", options_data["expiry"], "neutral")
+        with option_cards[1]:
+            render_metric_card("Put/Call Volume", f"{options_data['put_call_ratio']:.2f}", "Above 1 implies defensive demand", "accent")
+        with option_cards[2]:
+            render_metric_card("Max Pain", f"{options_data['max_pain']:.2f}", "Strike with minimum aggregate pain", "neutral")
+        with option_cards[3]:
+            render_metric_card("Net GEX", f"{options_data['net_gex'] / 1e9:,.2f}B", "Positive often dampens volatility", "bull" if options_data["net_gex"] >= 0 else "bear")
+        with option_cards[4]:
+            render_metric_card("Zero Gamma", zero_gamma_value, zero_gamma_subtitle, zero_gamma_tone)
+        render_chart(
+            f"SPX Options Positioning ({options_data['expiry']})",
+            build_options_figure(options_data, options_data["spot"]),
+            mobile_builder=lambda: build_mobile_options_figure(options_data),
+        )
+        st.caption("Data sources: CBOE delayed quotes, implied volatility analytics, and Yahoo Finance VIX term structure.")
+        return True
+
+    if active_view == "ETF Sortino Leadership":
+        render_special_dashboard_header(
+            active_view,
+            "Rank liquid US equity ETFs by recent Sortino ratio and aggregate sector weight leadership without loading the main ticker stack.",
+            history_window=None,
+            load_mode="Immediate",
+            load_subtitle="Loads when the dashboard is opened.",
+            source_summary="Yahoo ETF universe",
+        )
+        with st.spinner("Loading ETF Sortino leadership dashboard..."):
+            etf_sortino_data = compute_etf_sortino_leadership(top_n=sortino_top_n)
+        if not etf_sortino_data:
+            st.info("ETF Sortino leadership data could not be constructed from the current Yahoo Finance ETF universe and holdings coverage.")
+            return True
+        render_etf_sortino_dashboard(etf_sortino_data)
+        st.caption("Data sources: Yahoo Finance ETF universe metadata, price history, and holdings coverage.")
+        return True
+
+    return False
+
+
+def main() -> None:
+    configure_page()
+    apply_custom_style()
+    ticker, period, active_view, selected_expiry, spx_payload, sortino_top_n = render_sidebar(default_ticker="NVDA")
+
+    if render_special_dashboard_view(active_view, period, selected_expiry, spx_payload, sortino_top_n):
         return
 
     with st.spinner(f"Loading data for {ticker}..."):
@@ -5174,7 +6785,7 @@ def main() -> None:
     render_data_status(price_df, price_source, price_symbol, stl_df, stl_source, stl_symbol)
     active_view_label = display_view_name(active_view)
     st.markdown(
-        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators are selected from the chart picker, while Fear &amp; Greed, Canary, Option Gamma, ETF Sortino, JHEQX Collar, and Fed Watch run from the quick-access buttons.</div>',
+        f'<div class="section-note">Active view: <strong>{active_view_label}</strong>. Core indicators stay in the chart picker, while Market Pulse, Canary, Breadth Thrust, Options Flow, ETF Sortino, JHEQX Collar, and Fed Watch now live in the compact special dashboard selector.</div>',
         unsafe_allow_html=True,
     )
 
